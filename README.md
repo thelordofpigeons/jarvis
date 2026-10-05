@@ -61,8 +61,6 @@ Every step appends to a hash-chained audit log that holds ids, counts and hashes
 
 ## Quick start
 
-You need Windows 11, Python 3.12 and git. A logged-in Claude Code CLI and `gh` are optional.
-
 ```powershell
 git clone https://github.com/thelordofpigeons/jarvis.git
 cd jarvis
