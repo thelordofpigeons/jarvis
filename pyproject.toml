@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jarvisd"
+version = "1.1.0"
+description = "JARVIS: a privacy-first personal agentic daemon for Windows (observe-only morning digest)"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Amine Karcha" }]
+dependencies = [
+  "pydantic>=2.7,<3",
+  "APScheduler>=3.10,<4",
+]
+
+[project.optional-dependencies]
+# The read-only web page (`jarvis hub`). httpx2 is needed by `jarvis hub --check` through
+# fastapi's TestClient. requirements.lock pins the tested versions of everything.
+hub = ["fastapi>=0.115", "uvicorn>=0.30", "httpx2>=2"]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["jarvisd*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Repo root on sys.path so `import jarvisd` works without installing the package.
+pythonpath = ["."]
+# Paid tests carry the live marker and are skipped unless run with: pytest -m live
+addopts = "-m 'not live'"
+markers = [
+  "live: paid or machine-touching smoke tests, skipped by default",
+]

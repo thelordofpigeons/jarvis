@@ -1,0 +1,24 @@
+# Secrets never live in the repo. They live in Windows Credential Manager
+# under the jarvis account (report section 9c).
+*.key
+*.pem
+.env
+.env.*
+secrets.toml
+
+# Disposable state (section 9d: models, queue and caches are not backed up)
+models/
+logs/
+queue/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local overrides of the human-owned config
+jarvis.local.toml
+
+# jarvisd v1 operational state and scratch
+state/
+/hub/
+*.tmp

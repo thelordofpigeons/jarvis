@@ -1,0 +1,29 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 2410,
+  "duration_api_ms": 2105,
+  "num_turns": 1,
+  "result": "{\"headline\": \"Quiet night, one open thread needs a reply\", \"attention\": [{\"id\": \"item-a\", \"why\": \"Synthetic thread waits on a reviewer\"}], \"summaries\": {\"item-a\": \"Synthetic thread, waiting on a reviewer\", \"item-b\": \"Synthetic repo, two commits\"}, \"notes\": \"\"}",
+  "stop_reason": "end_turn",
+  "session_id": "00000000-0000-4000-8000-000000000001",
+  "total_cost_usd": 0.0123,
+  "usage": {
+    "input_tokens": 1200,
+    "output_tokens": 150,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "modelUsage": {
+    "claude-sonnet-synthetic": {
+      "inputTokens": 1200,
+      "outputTokens": 150,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0,
+      "costUSD": 0.0123
+    }
+  },
+  "permission_denials": [],
+  "api_error_status": null
+}

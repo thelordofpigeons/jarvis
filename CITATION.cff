@@ -1,0 +1,22 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "JARVIS: a personal agentic daemon (jarvisd)"
+abstract: >-
+  A privacy-first resident daemon for one person's machine. Version 1 is observe-only:
+  it collects from a personal notes vault, a task file, local git repositories and its own
+  logs, applies a tier gate before anything is read into a Claude-bound payload, and writes
+  one morning digest. A local model tier, a read-only web page, a push notification, a memory
+  consolidation pass and an ask command exist as adapters tested against fakes.
+authors:
+  - family-names: Karcha
+    given-names: Amine
+version: 1.1.0
+date-released: 2026-10-05
+license: MIT
+repository-code: https://github.com/thelordofpigeons/jarvis
+keywords:
+  - agentic daemon
+  - privacy
+  - local models
+  - Windows

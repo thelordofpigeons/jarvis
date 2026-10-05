@@ -1,0 +1,19 @@
+# Legitimate hits of the generic identity rules in tests/test_repo_hygiene.py.
+# Each entry: the file, the rule it trips, and why that is intended. An entry that no longer
+# matches anything fails the test, so this list cannot rot into a blanket exemption.
+# Rules: user-profile-path, owner-name, tailscale, email.
+
+[[allow]]
+path = "LICENSE"
+rule = "owner-name"
+reason = "The MIT copyright line names the author; a licence without its holder is not valid."
+
+[[allow]]
+path = "CITATION.cff"
+rule = "owner-name"
+reason = "A citation file exists to name the author so that people can credit the work."
+
+[[allow]]
+path = "pyproject.toml"
+rule = "owner-name"
+reason = "Package metadata carries the author name, as for any published Python package."

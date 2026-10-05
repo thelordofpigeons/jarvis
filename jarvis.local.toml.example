@@ -1,0 +1,70 @@
+# Copy to jarvis.local.toml (gitignored) and edit. Everything private lives there, never in
+# the tracked jarvis.toml (design D10). All names and paths below are synthetic; replace
+# <you> with your Windows user name.
+#
+# Merge rules: tables merge key by key. Lists under [gates] and [paths].vault_forbidden
+# APPEND to the tracked lists, so this file can add sensitive globs, tags, terms and
+# forbidden folders but cannot remove tracked ones. Every other value, lists included,
+# overrides the tracked value.
+#
+# Paths: "~" is your home folder, a relative path is relative to the repo root, anything
+# else is taken as written.
+
+[meta]
+# Who and where this install is. The tracked file carries generic placeholders.
+machine = "my-pc"
+owner_account = "<you>"
+
+[paths]
+# Added to the tracked vault_forbidden list (~/brain/telos and ~/brain/notes stay forbidden).
+# Use it for a work or client folder whose repos must never reach a Claude-bound payload.
+vault_forbidden = [
+  "~/Documents/example-employer",
+]
+
+[gates]
+# Case-insensitive, accent-folded. A match withholds the whole item; the audit records only
+# term:<index>, never the term.
+sensitive_terms = []
+# Added to the tracked globs and to the hardcoded floor (telos, notes, any "sensitive" folder).
+sensitive_path_globs = [
+  "**/example-private-project/**",
+]
+
+[digest]
+# work metadata (branch, counts, commit subjects) reaches Claude only when this is true.
+work_metadata_to_claude = false
+# ClickUp section (docs/v1-operations.md). Leave it off until `jarvis clickup check --live` has
+# passed on this machine. The user id is private, so it lives here and nowhere tracked.
+# clickup_enabled = true
+# clickup_user_id = "123456"
+# Explicit allowlist. Nothing is discovered by globbing. counts_only emits numbers only,
+# no commit subjects and no file names.
+repos = [
+  { name = "example-api",   path = "C:/Users/<you>/Dev/example-api",   work = true,  counts_only = false },
+  { name = "example-notes", path = "~/Dev/example-notes",              work = false, counts_only = true },
+]
+
+[hygiene]
+# Substrings that must never appear in any tracked file. Keep real project or dataset names
+# here (this file is gitignored) so they never have to be written into the public repo.
+# The hygiene test also reads [meta] above and refuses your user name and machine name.
+deny_substrings = []
+
+# --- plan P2 ------------------------------------------------------------------------------
+# GitHub collector. Tracked defaults are enabled = true, max_prs = 10, timeout_s = 20. A repo
+# the active `gh` account cannot read is reported as "no access", never as an error. Repos
+# come from [digest].repos above; there is no second list.
+[digest.github]
+enabled = true
+
+# Phone push, see docs/notify-ntfy.md. The token VALUE lives in a user environment variable;
+# only its name is written here. "ntfy" falls back to the toast on failure, "multi" sends both.
+[notify]
+adapter = "toast"
+# adapter = "ntfy"
+# ntfy_url = "https://jarvis-host.example-tailnet.ts.net"
+# ntfy_topic = "example-long-random-topic"
+# ntfy_token_env = "JARVIS_NTFY_TOKEN"
+# ntfy_priority = 3
+# ntfy_click_template = "obsidian://open?vault={vault}&file={path}"

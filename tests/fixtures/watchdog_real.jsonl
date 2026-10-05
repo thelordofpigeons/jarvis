@@ -1,0 +1,14 @@
+{"ts": "2026-09-01T00:00:00+00:00", "event": "health_crashloop", "consecutive_fails": 9}
+{"ts": "2026-10-05T10:17:01.389645+00:00", "event": "watchdog_start", "pid": 4242}
+{"ts": "2026-10-05T10:17:02.389645+00:00", "event": "probe", "health": "absent", "detail": "connection refused, server not running", "consecutive_fails": 0, "gpu_contention": [], "restarts_used_this_hour": 0, "action": "none"}
+{"ts": "2026-10-05T10:20:03.865077+00:00", "event": "killswitch_task_absent", "task": "JarvisKillSwitch", "note": "elevated task not registered, see docs/phase0-runbook.md"}
+{"ts": "2026-10-05T10:20:03.865077+00:00", "event": "killswitch_trip", "via": "direct", "reason": "phase0-verification", "scope": "Daemon", "dry_run": true}
+{"ts": "2026-10-05T10:20:23.584841+00:00", "event": "killswitch_result", "via": "direct", "rc": 0, "stdout": "JARVIS kill switch: scope=Daemon dryrun=True admin=False\n[DRYRUN] elevation not elevated", "stderr": ""}
+{"ts": "2026-10-05T10:50:10.596647+00:00", "event": "killswitch_trip", "via": "scheduled_task", "task": "JarvisKillSwitch", "reason": "phase0-elevated-branch-verification", "scope": "Daemon"}
+{"ts": "2026-10-05T11:00:00+00:00", "event": "health_degraded", "consecutive_fails": 2}
+{"ts": "2026-10-05T11:05:00+00:00", "event": "restart_attempt", "restarts_used_this_hour": 1}
+{"ts": "2026-10-05T11:10:00+00:00", "event": "restart_skipped", "why": "budget"}
+{"ts": "2026-10-05T11:15:00+00:00", "event": "health_crashloop", "consecutive_fails": 5}
+{"ts": "2026-10-05T11:20:00+00:00", "event": "restart_attempt", "restarts_used_this_hour": 2}
+{"ts": "2026-10-05T11:25:00+00:00", "event": "gpu_yield", "gpu_contention": ["chrome.exe"]}
+{"ts": "2026-10-05T11:30:00+00:00", "event": "watchdog_stop"}

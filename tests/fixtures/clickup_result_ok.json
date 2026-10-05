@@ -1,0 +1,29 @@
+{
+  "type": "result",
+  "subtype": "success",
+  "is_error": false,
+  "duration_ms": 18200,
+  "duration_api_ms": 17100,
+  "num_turns": 3,
+  "result": "[{\"task_id\": \"86abc001\", \"name\": \"Synthetic overdue task\", \"status\": \"IN DEVELOPMENT\", \"due\": \"2020-01-01\", \"updated\": \"2026-10-04\", \"list\": \"Synthetic list\", \"url\": \"https://app.clickup.com/t/86abc001\"}, {\"task_id\": \"86abc002\", \"name\": \"Synthetic later task\", \"status\": \"IN REVIEW\", \"due\": \"2999-01-01\", \"updated\": \"2026-10-05\", \"list\": \"Synthetic list\", \"url\": \"https://app.clickup.com/t/86abc002\"}, {\"task_id\": \"86abc003\", \"name\": \"Synthetic task without a due date\", \"status\": \"READY FOR DEVELOPMENT\", \"due\": null, \"updated\": \"2026-10-05\", \"list\": \"Another synthetic list\", \"url\": \"https://app.clickup.com/t/86abc003\"}]",
+  "stop_reason": "end_turn",
+  "session_id": "00000000-0000-4000-8000-000000000002",
+  "total_cost_usd": 0.0412,
+  "usage": {
+    "input_tokens": 28400,
+    "output_tokens": 420,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  },
+  "modelUsage": {
+    "claude-haiku-synthetic": {
+      "inputTokens": 28400,
+      "outputTokens": 420,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0,
+      "costUSD": 0.0412
+    }
+  },
+  "permission_denials": [],
+  "api_error_status": null
+}

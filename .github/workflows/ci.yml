@@ -1,0 +1,45 @@
+# Offline test suite only. There is no Claude binary, login or secret on this runner: the
+# self-test skips its Claude check when it finds none (CI=true), and every test that exercises
+# the Claude wrapper uses tests/fakes/fake_claude.py. Nothing here can spend money.
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      # Belt and braces next to .gitattributes: never let the runner rewrite line endings.
+      - name: Keep LF on checkout
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements.lock
+
+      - name: Test suite
+        run: python -m pytest -q
+
+      - name: Watchdog self-test
+        run: python bin/watchdog.py --self-test
+
+      - name: Daemon self-test (Claude check skips here)
+        run: python -m jarvisd self-test

@@ -1,0 +1,46 @@
+{
+  "filesystem": {
+    "denyRead": [
+      "~",
+      "~/brain/telos/sensitive",
+      "~/brain/notes",
+      "~/Documents/Work",
+      "~/.ssh",
+      "~/.claude",
+      "~/.aws",
+      "~/AppData/Roaming/Microsoft/Credentials",
+      "~/AppData/Local/Microsoft/Credentials",
+      "**/.env",
+      "**/*.pem",
+      "**/*.key",
+      "**/id_rsa*",
+      "**/id_ed25519*"
+    ],
+    "allowRead": [
+      "~/jarvis",
+      "~/brain/raw",
+      "~/brain/sessions",
+      "~/brain/insights",
+      "~/brain/telos"
+    ],
+    "allowWrite": [
+      "~/jarvis/queue",
+      "~/jarvis/logs",
+      "~/brain/raw/jarvis"
+    ],
+    "denyWrite": [
+      "~/brain/telos",
+      "~/brain/notes",
+      "~/Documents/Work",
+      "~/.claude",
+      "~/.ssh",
+      "~/jarvis/jarvis.toml",
+      "~/jarvis/bin",
+      "~/jarvis/srt-settings.json"
+    ]
+  },
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": []
+  }
+}

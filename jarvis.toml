@@ -1,0 +1,281 @@
+# JARVIS daemon configuration
+# Human-owned. The daemon reads this and never writes it.
+# Thresholds are reviewed weekly against logged corrections (report section 4a).
+
+[meta]
+version = "1.1.0"
+phase = "2"
+# Generic placeholders. The real values live in the gitignored jarvis.local.toml.
+machine = "your-machine"
+owner_account = "your-account"
+daemon_account = "jarvis"          # created in phase 0, standard user, no human group membership
+
+# Path rules (jarvisd/config.py and bin/watchdog.py): "~" is the current user's home, a
+# relative value is relative to the folder holding this file (the repo root), anything else
+# is taken as written. The vault is expected at ~/brain; move it with jarvis.local.toml.
+[paths]
+root        = "."
+queue       = "queue"                                     # outside any Syncthing folder (section 4c)
+logs        = "logs"
+models      = "models"
+# The daemon may write ONLY to these two vault locations (section 4c).
+vault_write_raw      = "~/brain/raw/jarvis"
+vault_write_sessions = "~/brain/sessions"                 # jarvis-*.md only
+# Never written, never read into a Claude-bound payload. jarvis.local.toml can ADD folders
+# here (a work or client folder, say) and can never remove these.
+vault_forbidden = [
+  "~/brain/telos",
+  "~/brain/notes",
+]
+
+[gates]
+# Gate order is fixed in code, not configurable: tier, then importance, then confidence.
+# Gate 1, tier. Enforced in the dispatch layer on paths and tags, never in a prompt.
+sensitive_path_globs = [
+  "**/brain/telos/sensitive/**",
+]
+sensitive_tags = ["sensitive", "private", "medical", "financial-personal"]
+# Gate 2, importance. These route to Claude with confirm-required.
+importance_escalate = ["financial", "client-facing", "irreversible", "work-prod"]
+# Gate 3, confidence. Below this and not sensitive, escalate to Claude.
+confidence_threshold = 0.72
+
+[router]
+model = "gemma-3-270m"             # fallback: smollm3-3b if 270M cannot hold the schema
+fallback_model = "smollm3-3b"
+# Contract fields the router must emit (report section 4a). Validated with pydantic.
+contract_fields = ["category", "sensitive", "importance", "confidence", "needs_tools", "language", "reason"]
+languages_expected = ["en", "fr", "ar-darija-latin"]
+darija_verified = false            # open gap: Darija classification untested
+
+[agent]
+model = "gpt-oss-20b"              # phase 1 decision point vs qwen3-30b-a3b
+alternative = "qwen3-30b-a3b"
+decided = false
+
+[llama]
+host = "127.0.0.1"
+port = 8080
+cors = false
+# The API key VALUE lives in Windows Credential Manager under the jarvis account.
+# Only the entry name belongs in this file.
+api_key_credential = "jarvis/llama-server-api-key"
+daily_restart = "05:30"            # clears VRAM fragmentation (section 2 hardening)
+swap_scheduled_task = "JarvisLlamaSwap"   # registered in phase 1, owns llama-server
+
+[watchdog]
+# Runs under the HUMAN account. It is the kill switch (section 9c).
+poll_seconds = 20
+health_url = "http://127.0.0.1:8080/health"
+health_fail_threshold = 3          # consecutive failures before restart
+restart_backoff_seconds = 30
+max_restarts_per_hour = 4          # exceeded, stop trying and notify instead of looping
+# GPU yield rule: daemon releases the GPU when a foreground app needs it.
+gpu_yield_enabled = true
+gpu_yield_processes = ["blender", "davinci", "obs64", "Photoshop", "AfterFX", "chrome"]
+gpu_yield_vram_headroom_mb = 2048
+
+[killswitch]
+# The elevated work is done by a Task Scheduler task created once in phase 0.
+scheduled_task = "JarvisKillSwitch"
+firewall_rule_name = "JARVIS-daemon-egress-block"
+# Full scope also drops remote access. Test Full only while physically at the machine.
+default_scope = "Daemon"
+audit_log = "logs/killswitch.jsonl"
+
+[sandbox]
+# Anthropic sandbox-runtime wraps every daemon-initiated shell, browser and
+# filesystem action (section 9a).
+#
+# PATH TRAP, do not "simplify" this to a bare `srt`: Python's subtitle tool
+# installs a script called srt into Python312\Scripts, which sits earlier on PATH
+# and shadows the npm binary. Bare `srt` runs the subtitle parser, silently.
+# Always invoke the absolute path below.
+srt_path = "~/AppData/Roaming/npm/srt.cmd"
+srt_version = "0.0.77"
+settings_path = "srt-settings.json"
+# Documented gap: srt does not fence DNS on Windows, so the jarvis account needs a
+# filtering resolver or a hosts allowlist on top of the WFP egress filter.
+dns_fenced = false
+
+[audit]
+# Model audit pipeline, per download (section 9b). Steps 1 to 8 gate phase 1.
+require_sha256 = true
+require_license_record = true
+allowed_formats = ["gguf", "safetensors"]
+block_pickle = true
+log = "logs/audit.jsonl"
+
+[trust]
+# Actions proposed by the local model face a stricter allowlist than Claude's (section 4d).
+local_model_allowlist = ["read_vault", "write_candidate", "classify", "digest"]
+claude_allowlist = ["read_vault", "write_candidate", "classify", "digest", "propose_action"]
+# Anything outward, anything writing outside the vault, anything work-adjacent:
+# deterministic allowlist plus human confirm, regardless of any classifier verdict.
+always_confirm = ["send_message", "post_public", "browser_submit", "write_outside_vault", "work_adjacent"]
+
+# ---------------------------------------------------------------------------------------
+# jarvisd v1 (option 2, morning digest). Appended 2026-10-05, T1 of docs/v1-plan.md.
+# Everything above this line is Phase 0 and unchanged. New tables below; unknown keys in
+# them are rejected by jarvisd/config.py. Private values (repo list, sensitive terms, extra
+# globs, deny patterns) never go in this tracked file: they live in jarvis.local.toml,
+# see jarvis.local.toml.example.
+#
+# [router] adapter: the plan asks for `adapter = "stub"` under [router]. A key cannot be
+# added to [router] from the end of the file, and this file is append-only for agents, so
+# jarvisd/config.py defaults router.adapter to "stub". To make it explicit, add the line
+# `adapter = "stub"` inside [router] by hand.
+# ---------------------------------------------------------------------------------------
+
+[daemon]
+tick_seconds = 120                 # reconcile + heartbeat + KILL/PAUSE check cadence
+heartbeat_seconds = 30
+state_dir = "state"                # gitignored operational state
+
+[digest]
+run_at = "06:30"                   # local time
+window_hours_default = 36          # first run, no watermark yet
+window_hours_max = 72              # a long gap never produces a longer window
+max_payload_bytes = 40000          # cap on what one Claude call may carry
+max_item_chars = 600
+write_session_note = false         # true would write brain/sessions/jarvis-*.md and feed RECENT.md
+clickup_enabled = false            # stretch task T13, off until the live check passes
+# Untracked noise that does not count as "dirty" in the git collector.
+dirty_ignore = [".codegraph", ".clever.json", "zap-report*", "ZAP-Report*"]
+# Scheduled tasks whose last run and result the digest reports. Add your own task names in jarvis.local.toml.
+watched_tasks = ["JarvisDaemon"]
+# Fail closed (design D6): work repo metadata reaches Claude only if jarvis.local.toml sets this true.
+work_metadata_to_claude = false
+
+[claude]
+binary = ""                        # empty: resolve `claude` on PATH once at daemon start
+model = "sonnet"
+timeout_seconds = 180
+max_budget_usd = 0.50              # per call, passed as --max-budget-usd
+daily_budget_usd = 2.00            # ledger refuses before spawn when spent + reserved + cap exceeds this
+daily_calls = 6
+isolation_overhead_tokens = 3000   # slack in the token tripwire (design section 7)
+archive_payloads = false           # true keeps each sealed payload under logs/payloads/
+# Preflight greps `claude --help` for each of these; a missing one disables Claude calls.
+required_flags = [
+  "--output-format",
+  "--model",
+  "--setting-sources",
+  "--disable-slash-commands",
+  "--strict-mcp-config",
+  "--tools",
+  "--no-session-persistence",
+  "--permission-prompts",
+  "--max-budget-usd",
+  "--system-prompt",
+]
+
+[local]
+enabled = false                    # local tier is not installed in v1 (design D4)
+backend = ""
+
+[notify]
+adapter = "toast"
+toast_script = "deploy/notify-jarvis.ps1"
+
+[retention]
+audit_max_bytes = 20971520         # 20 MB, then rotate
+audit_keep_days = 180
+done_job_days = 60
+failed_job_days = 60
+runs_days = 30
+held_days = 14
+logs_warn_mb = 500
+disk_warn_gb = 10
+
+[queue.classes.background_batch]
+timeout_s = 1800
+local_wait_s = 600
+
+[router.stub]
+confidence = 0.0                   # always below the gate, so every item lands on the real gate code path
+# Importance buckets for the stub router. Regexes, matched against item title and text.
+# Synthetic and generic on purpose: client or dataset names do not belong in a tracked file.
+[router.stub.rules]
+financial = ['(?i)\b(invoice|facture|payment|paiement|salary|salaire|refund|remboursement|tax|impot)\b']
+client_facing = ['(?i)\b(client|customer|proposal|devis|contract|contrat|deadline|livraison)\b']
+irreversible = ['(?i)\b(delete|drop table|force[- ]push|rotate (the )?key|revoke|supprimer|purge)\b']
+work_prod = ['(?i)\b(prod|production)\b.*\b(deploy|migration|incident|outage|hotfix)\b']
+
+# ---------------------------------------------------------------------------------------
+# Plan P2, appended: GitHub collector and ntfy. The ntfy keys belong to [notify] above and
+# cannot be added from here; they default in jarvisd/config.py (ntfy_url, ntfy_topic,
+# ntfy_token_env, ntfy_priority, ntfy_timeout_s, ntfy_click_template) and the owner sets
+# them in jarvis.local.toml, see docs/notify-ntfy.md. The server address is private.
+# ---------------------------------------------------------------------------------------
+
+[digest.github]
+enabled = true                     # read-only `gh` calls for the repos in [digest].repos; a repo the active gh account cannot read is reported as "no access", never as an error
+max_prs = 10                       # per list: PRs you authored, PRs waiting for your review
+timeout_s = 20                     # per gh call
+
+# ---------------------------------------------------------------------------------------
+# Local tier adapter (P3, jarvisd/local.py, docs/local-tier.md). Appended, nothing above changed.
+# [local] above stays enabled = false; the adapter has been tested against a fake server and
+# not yet benchmarked on real hardware. The keys below are read from [local] and have
+# defaults, so they are listed here as comments (a table cannot be reopened in TOML). Put real
+# values in jarvis.local.toml, which overrides this file.
+#
+#   [local]
+#   enabled = true
+#   backend = "llama"               # the one adapter provided; anything else reads as unavailable
+#   api_key_env = "JARVIS_LLAMA_KEY"   # NAME of an environment variable, never the key itself
+#   router_model = ""               # empty: use [router].model
+#   summary_model = ""              # empty: use router_model
+#   summarize_sensitive = false     # true lets the LOCAL model read sensitive items; text never leaves loopback
+#   health_timeout_s = 2.0
+#   request_timeout_s = 30.0
+#   summary_timeout_s = 120.0
+#   max_inline_wait_s = 30          # cap on one wait for a down server; [queue.classes.*].local_wait_s is the policy
+#   retry_cooldown_s = 60           # after a wait gave up, or while degraded: do not wait or ask again for this long
+#   degrade_after = 2               # consecutive bad replies that mark the tier degraded
+#   max_input_chars = 4000          # item text sent to the router model
+#
+# The server address is [llama].host and [llama].port above. Any host other than 127.0.0.1 is
+# refused by the client, in config or not.
+# ---------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------
+# Plan P4, appended: the read-only work hub (jarvisd/hub, docs/hub.md). `jarvis hub` serves
+# it on 127.0.0.1 only; there is deliberately no host key. It reads state, queue, audit and
+# the digest notes, never writes and never calls Claude.
+# ---------------------------------------------------------------------------------------
+
+[hub]
+port = 8765
+refresh_s = 30                     # an open page re-fetches itself this often; 0 turns the script off
+audit_rows = 50                    # rows on the Audit view
+# allowed_hosts = []               # extra Host header names, for `tailscale serve`; the tailnet name is private, set it in jarvis.local.toml
+
+# ---------------------------------------------------------------------------------------
+# Plan P5, appended: the nightly consolidation pass (spec 6a, jarvisd/consolidate.py). It
+# reads the session notes of the window through the same tier gate as the digest, asks
+# Claude once for at most max_candidates insights, and writes brain/raw/jarvis/
+# candidates-<date>.md for the owner to promote by hand. It never writes to insights/ or
+# telos/. Off by default: one paid call a night. Extra keys with code defaults:
+# window_hours_default, window_hours_max, max_notes, max_lines_per_note.
+# ---------------------------------------------------------------------------------------
+
+[consolidate]
+enabled = false
+run_at = "02:00"
+max_candidates = 8
+
+# ---------------------------------------------------------------------------------------
+# Plan P6, appended: `jarvis ask` needs no keys. The ClickUp section (plan T13) keeps
+# [digest].clickup_enabled = false above and adds these keys to [digest]; a table cannot be
+# reopened here, so they default in jarvisd/config.py and are listed as comments. Set real
+# values in jarvis.local.toml. Run `jarvis clickup check --live` once before switching the
+# section on, see docs/v1-operations.md.
+#
+#   [digest]
+#   clickup_user_id = ""            # digits only, your ClickUp user id; empty = the connector's signed-in account (private: local file only)
+#   clickup_max_budget_usd = 0.10   # cap of the one clickup_read call (--max-budget-usd); the plan estimated 0.19, the live check decides
+#   clickup_timeout_s = 75          # wait for that call
+#   clickup_allow_tool_search = false  # true only if the live check showed the connector tools need ToolSearch
+# ---------------------------------------------------------------------------------------

@@ -1,0 +1,7 @@
+# Checked-in text is LF on every machine, including the Windows CI runner: several tests assert
+# exact bytes (golden digests, fixtures, the deploy scripts) and must not see CRLF.
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.zip binary
+*.gz binary
