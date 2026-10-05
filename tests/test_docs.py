@@ -97,24 +97,25 @@ def test_readme_is_a_ten_minute_read() -> None:
 def test_readme_has_the_required_sections_in_order() -> None:
     headings = re.findall(r"^## (.+)$", _text("README.md"), re.MULTILINE)
     expected = [
-        "What it is", "Status", "Architecture in 60 seconds", "Privacy model", "Install and first run",
-        "Commands", "Cost", "What this is not", "Roadmap", "Documentation", "License",
+        "At a glance", "How a morning run works", "Quick start", "Status by phase", "Privacy model",
+        "CLI", "What this is not", "Cost", "Docs", "License",
     ]
     positions = [headings.index(h) for h in expected]
     assert positions == sorted(positions), f"sections out of order: {headings}"
 
 
-def test_readme_opens_with_one_paragraph_saying_what_jarvis_is() -> None:
-    body = _section(_text("README.md"), "What it is").strip()
-    paragraphs = [p for p in body.split("\n\n") if p.strip() and not p.lstrip().startswith(("-", "|", "`"))]
-    assert len(paragraphs) == 1
-    folded = paragraphs[0].casefold()
-    for needle in ("daemon", "windows", "observe-only", "claude", "digest"):
-        assert needle in folded, f"the opening paragraph does not mention {needle}"
+def test_readme_opens_with_a_tagline_and_an_at_a_glance_block() -> None:
+    text = _text("README.md")
+    lines = text.splitlines()
+    assert lines[0] == "# jarvis" and lines[2].startswith("*") and "windows" in lines[2].casefold()
+    assert len(re.findall(r"img\.shields\.io|badge\.svg", text.split("## At a glance")[0])) <= 5
+    folded = _section(text, "At a glance").casefold()
+    for needle in ("daemon", "observe-only", "claude", "digest", "not built"):
+        assert needle in folded, f"the at-a-glance block does not mention {needle}"
 
 
 def test_status_table_covers_phases_zero_to_nine_with_honest_states() -> None:
-    rows = _table_rows(_section(_text("README.md"), "Status"))
+    rows = _table_rows(_section(_text("README.md"), "Status by phase"))
     assert [r[0].split()[0] for r in rows] == [str(n) for n in range(10)], rows
     for row in rows:
         assert len(row) == 4, row
@@ -123,7 +124,7 @@ def test_status_table_covers_phases_zero_to_nine_with_honest_states() -> None:
 
 
 def test_status_states_match_what_the_tree_contains() -> None:
-    rows = {r[0].split()[0]: r for r in _table_rows(_section(_text("README.md"), "Status"))}
+    rows = {r[0].split()[0]: r for r in _table_rows(_section(_text("README.md"), "Status by phase"))}
     # Rows that claim something exists must name files that exist; "not built" rows must not claim code.
     for phase, row in rows.items():
         for token in _BACKTICK.findall(row[3]):
@@ -143,13 +144,12 @@ def test_status_states_match_what_the_tree_contains() -> None:
         assert rel in row[3], f"{rel} exists but its phase row does not name it"
 
 
-def test_architecture_diagram_is_an_ascii_block_inside_the_readme() -> None:
-    section = _section(_text("README.md"), "Architecture in 60 seconds")
-    block = re.search(r"```\n(.+?)\n```", section, re.DOTALL)
-    assert block, "the diagram must be a fenced block"
+def test_architecture_diagram_is_a_mermaid_flowchart_inside_the_readme() -> None:
+    section = _section(_text("README.md"), "How a morning run works")
+    block = re.search(r"```mermaid\n(flowchart LR\n.+?)\n```", section, re.DOTALL)
+    assert block, "the diagram must be a fenced mermaid flowchart LR"
     diagram = block.group(1)
-    assert all(ord(ch) < 128 for ch in diagram), "ASCII only, so it renders anywhere"
-    for needle in ("collect", "gate", "seal", "claude", "write", "audit"):
+    for needle in ("collect", "gate", "claude", "writer", "audit", "ledger"):
         assert needle in diagram.casefold(), f"the diagram does not show {needle}"
     assert len(diagram.splitlines()) <= 40
 
@@ -164,10 +164,10 @@ def test_privacy_model_is_exactly_five_bullets() -> None:
 
 
 def test_install_section_has_the_commands_a_stranger_needs() -> None:
-    section = _section(_text("README.md"), "Install and first run")
+    section = _section(_text("README.md"), "Quick start")
     for needle in (
         "setup-venv.ps1", "jarvis.local.toml.example", "jarvis.local.toml", "self-test",
-        "run-digest --dry-run", "register-jarvisd-task.ps1", "-m pytest -q", "git clone",
+        "run-digest --dry-run", "install-task", "-m pytest -q",
     ):
         assert needle in section, f"install section misses: {needle}"
     assert "Python 3.12" in section and "Windows" in section
@@ -176,7 +176,7 @@ def test_install_section_has_the_commands_a_stranger_needs() -> None:
 def test_every_cli_command_is_in_the_readme_table() -> None:
     parser = build_parser()
     choices = next(a.choices for a in parser._actions if getattr(a, "choices", None))
-    section = _section(_text("README.md"), "Commands")
+    section = _section(_text("README.md"), "CLI")
     rows = _table_rows(section)
     listed = " ".join(r[0] for r in rows)
     for name in choices:
@@ -197,9 +197,9 @@ def test_what_this_is_not_says_the_three_hard_truths() -> None:
         assert needle in folded, f"'What this is not' misses: {needle}"
 
 
-def test_roadmap_and_license_sections() -> None:
-    roadmap = _section(_text("README.md"), "Roadmap")
-    assert len(re.findall(r"^\d+\. |^- ", roadmap, re.MULTILINE)) >= 3
+def test_next_steps_and_license_sections() -> None:
+    status = _section(_text("README.md"), "Status by phase")
+    assert len(re.findall(r"^\d+\. ", status, re.MULTILINE)) >= 3
     license_text = _section(_text("README.md"), "License")
     assert "MIT" in license_text and "LICENSE" in license_text
 
@@ -215,7 +215,7 @@ def test_readme_names_nothing_private() -> None:
     # The employer's name and the other hashed names are checked by tests/test_repo_hygiene.py.
     for word in ("clever cloud", "clickup task", "c:/users", "c:\\users"):
         assert word not in folded, f"README mentions {word!r}"
-    assert "git clone https://github.com/" in _text("README.md")
+    assert "https://github.com/thelordofpigeons/jarvis" in _text("README.md")
 
 
 # --- architecture and contributing ---------------------------------------------------------------
@@ -314,6 +314,6 @@ def test_the_operations_manual_keeps_no_owner_run_log() -> None:
 
 
 def test_readme_documentation_section_describes_the_operator_manual() -> None:
-    section = _section(_text("README.md"), "Documentation")
+    section = _section(_text("README.md"), "Docs")
     assert "docs/v1-operations.md" in section and "operator" in section.casefold()
     assert "docs/phase0.md" in section and "docs/architecture.md" in section

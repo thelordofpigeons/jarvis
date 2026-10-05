@@ -1,50 +1,106 @@
-# JARVIS
+# jarvis
 
-A personal agentic daemon for one Windows machine, built privacy first.
+*A privacy-first morning digest daemon for one Windows machine, observe-only.*
 
-## What it is
+[![ci](https://github.com/thelordofpigeons/jarvis/actions/workflows/ci.yml/badge.svg)](https://github.com/thelordofpigeons/jarvis/actions/workflows/ci.yml)
+[![license MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+[![python 3.12](https://img.shields.io/badge/python-3.12-3776AB?style=flat-square)](https://www.python.org/)
+[![tests 1292](https://img.shields.io/badge/tests-1292-brightgreen?style=flat-square)](tests)
+[![platform Windows](https://img.shields.io/badge/platform-Windows-0078D6?style=flat-square)](#quick-start)
 
-JARVIS (`jarvisd`) is a resident Python daemon for Windows that reads a person's notes vault, active task, local git repositories, GitHub state and its own logs, and writes one morning digest note. Version 1 is observe-only: it never acts outward. Before anything is read into a payload for Claude, a deterministic tier gate decides what must stay on the machine, and the single batched `claude -p` call per digest runs with no tools, an isolated flag set and a daily budget cap. A local-model tier, a phone push, a read-only web page, a memory-consolidation pass and an `ask` command exist as adapters around that core. This README says which parts were run and which were only tested against fakes.
+## At a glance
 
-## Status
+- **Every morning** the resident daemon `jarvisd` reads a notes vault, the active task, local git repositories, GitHub state and its own logs, and writes one digest note. Version 1 is observe-only and never acts outward.
+- **Safety comes from code, not from a prompt.** A deterministic tier gate decides what must stay on the machine before anything is read into a payload, and the single batched `claude -p` call runs with no tools, an isolated flag set and a daily budget cap.
+- **Not built:** an operating-system sandbox around the daemon, any benchmarked local model, security tooling runs, retrieval, perception and voice. The status table says which parts were run and which were only tested against fakes.
 
-Phases follow the build order in the design (see `docs/v1-design.md`). The states are `done` (built, tested, and run for real by the author), `adapter only` (built and tested against a fake, never run against the real service or model) and `not built`.
+## How a morning run works
 
-| Phase | Name | State | What that means |
+```mermaid
+flowchart LR
+    subgraph collect["Collectors, read-only"]
+        direction TB
+        B["brain"]
+        K["task"]
+        G["git"]
+        H["github"]
+        S["system"]
+    end
+    collect --> TG{"Tier gate"}
+    TG -->|"held, never opened"| R
+    TG --> DG["Dispatch gates"]
+    DG --> CL["claude -p, isolated"]
+    DG -.-> LT["Local tier adapter"]
+    CL --> R["Renderer"]
+    LT -.-> R
+    R --> V["Vault writer"]
+    V --> N["Toast and ntfy"]
+    A[("Audit log")]
+    L[("Budget ledger")]
+    TG -.-> A
+    DG -.-> A
+    CL -.-> A
+    V -.-> A
+    L -.-> CL
+    style LT stroke-dasharray: 5 5
+```
+
+The Task Scheduler entry `JarvisDaemon` starts one resident Python process. It ticks every 2 minutes and has a cron trigger at 06:30. Each tick reconciles whether today's digest is due and, if so, writes a job file to the queue.
+
+1. **Collect** from the notes vault, the active task, git, GitHub and the daemon's own logs, all read-only.
+2. **Gate 1, tier:** path floor, tags and terms. A hit means the item is held and the file is never opened.
+3. **Router:** a stub, or the local model, classifies what is left.
+4. **Gates 2 and 3:** importance, then confidence, decide where an item may go.
+5. **Seal:** `clear_for_claude` produces a `GatedPayload`, the only type the Claude bridge accepts.
+6. **Claude:** one batched `claude -p` call with no tools, no MCP, no settings and capped spend.
+7. **Render:** a deterministic body, Claude's summary on top, held items listed by opaque id.
+8. **Write:** the single vault writer creates `raw/jarvis/digest-<date>.md`.
+9. **Notify:** a toast, and an optional ntfy push that carries counts only.
+
+Every step appends to a hash-chained audit log that holds ids, counts and hashes, never text. The guards are `state/KILL`, pause, the daily budget ledger and a circuit breaker. The read-only views are the `jarvis` CLI and `jarvis hub`, a loopback web page. More in [architecture](docs/architecture.md).
+
+## Quick start
+
+You need Windows 11, Python 3.12 and git. A logged-in Claude Code CLI and `gh` are optional.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File deploy\setup-venv.ps1
+copy jarvis.local.toml.example jarvis.local.toml
+.\jarvis.cmd self-test
+.\jarvis.cmd run-digest --dry-run
+.\jarvis.cmd install-task
+```
+
+`setup-venv.ps1` looks for the per-user python.org install, then for the `py` launcher; for any other install pass `-Python <path-to-python.exe>`. `jarvis.local.toml` is gitignored and is the only place your repository list, sensitive terms and private paths belong. The daemon expects a Markdown notes folder at `~/brain`, laid out as in [vault layout](docs/vault-layout.md). With no `RECENT.md` and no session notes the digest is empty, which is the right answer for an empty input.
+
+Read the dry-run output before the first paid run, as it is the exact text that would leave the machine. Without a Claude login the digest is built deterministically. The first paid call is `.\jarvis.cmd run-digest --claude --force`, capped by `jarvis.toml`. The full first-run checklist, stop and pause paths and the incident runbook are in [operations](docs/v1-operations.md).
+
+Elsewhere, `pip install -r requirements.lock` in a Python 3.12 virtualenv gives the tested set, and `pip install ".[hub]"` adds the hub. Windows is the supported target. The offline test suite never calls Claude: `.venv\Scripts\python.exe -m pytest -q`.
+
+## Status by phase
+
+Phases follow the build order in the [design](docs/v1-design.md). Legend: **Done** is built, tested and run for real by the author. **Adapter only** is built and tested against a fake, never run against the real service or model. **Not built** has no code.
+
+| Phase | Name | Status | What that means |
 |---|---|---|---|
-| 0 | Isolation | done | Kill switch, watchdog, hostile-daemon simulation and a sandbox policy (`bin/kill-switch.ps1`, `bin/watchdog.py`, `srt-settings.json`). Ran on the author's machine; the sandbox runtime could not be proven end to end without Administrator, and the v1 daemon is not under it. The kill switch also finds and kills the v1 daemon (`docs/killswitch-v1-patch.md`), proven against a stand-in daemon by the simulation (27 of 27 checks); a real trip against the live daemon has not been done. Record: `docs/phase0.md` |
-| 1 | Inference base | adapter only | `jarvisd/local.py` talks to a local llama-server on loopback and is tested against a fake server. No model was downloaded, `bin/bench.ps1` was never run, so there is no throughput, latency or accuracy number. Details: `docs/local-tier.md` |
-| 2 | Vertical slice | done | The morning digest end to end: queue, scheduler, tier gate, router contract, audit, CLI, toast. Run by hand on the author's machine since 2026-10-05, with a real Claude call. The unattended 06:30 scheduled run has not been observed yet (see "What this is not") |
-| 3 | Claude bridge | done | The `claude -p` subprocess bridge with its budget ledger and breaker (`jarvisd/claude.py`) is used live. The Agent SDK escalation and claude-code-router are not built, by decision |
-| 4 | Work hub | adapter only | The read-only web page (`jarvisd/hub/app.py`) and `jarvis ask` are built and tested; the page was not reviewed in a browser by its tests. GitHub, ClickUp and ntfy push are adapters tested against fakes. Not built: Slack, held-item triage, Inbox and Projects views, any action from the page |
-| 5 | Consolidation | adapter only | `jarvisd/consolidate.py` proposes memory candidates from session notes. Off by default and never run against the real model. Details: `docs/consolidation.md` |
-| 6 | Security widening | not built | No garak, promptfoo or mcp-scan run exists. Only the phase 0 kill-switch simulation is real |
-| 7 | Retrieval | not built | Native search of the notes tool is used instead |
-| 8 | Perception | not built | No code. Screenshots, OCR and browser automation are planned for rare cases only |
-| 9 | Voice | not built | Gated on a Darija speech benchmark that does not exist yet |
+| 0 | Isolation | Done | Kill switch, watchdog, hostile-daemon simulation and a sandbox policy (`bin/kill-switch.ps1`, `bin/watchdog.py`, `srt-settings.json`). Ran on the author's machine; the sandbox runtime could not be proven end to end without Administrator, and the v1 daemon is not under it. The kill switch also finds and kills the v1 daemon ([patch](docs/killswitch-v1-patch.md)), proven against a stand-in daemon by the simulation (27 of 27 checks); a real trip against the live daemon has not been done. Record: [phase 0](docs/phase0.md) |
+| 1 | Inference base | Adapter only | `jarvisd/local.py` talks to a local llama-server on loopback and is tested against a fake server. No model was downloaded, `bin/bench.ps1` was never run, so there is no throughput, latency or accuracy number. Details: [local tier](docs/local-tier.md) |
+| 2 | Vertical slice | Done | The morning digest end to end: queue, scheduler, tier gate, router contract, audit, CLI, toast. Run by hand on the author's machine since 2026-10-05, with a real Claude call. The unattended 06:30 scheduled run has not been observed yet (see "What this is not") |
+| 3 | Claude bridge | Done | The `claude -p` subprocess bridge with its budget ledger and breaker (`jarvisd/claude.py`) is used live. The Agent SDK escalation and claude-code-router are not built, by decision |
+| 4 | Work hub | Adapter only | The read-only web page (`jarvisd/hub/app.py`) and `jarvis ask` are built and tested; the page was not reviewed in a browser by its tests. GitHub, ClickUp and ntfy push are adapters tested against fakes. Not built: Slack, held-item triage, Inbox and Projects views, any action from the page |
+| 5 | Consolidation | Adapter only | `jarvisd/consolidate.py` proposes memory candidates from session notes. Off by default and never run against the real model. Details: [consolidation](docs/consolidation.md) |
+| 6 | Security widening | Not built | No garak, promptfoo or mcp-scan run exists. Only the phase 0 kill-switch simulation is real |
+| 7 | Retrieval | Not built | Native search of the notes tool is used instead |
+| 8 | Perception | Not built | No code. Screenshots, OCR and browser automation are planned for rare cases only |
+| 9 | Voice | Not built | Gated on a Darija speech benchmark that does not exist yet |
 
-## Architecture in 60 seconds
+Next steps, in order:
 
-```
-Task Scheduler "JarvisDaemon"  ->  jarvisd (one resident Python process)
-   tick every 2 min + cron 06:30  ->  reconcile: is today's digest due?  ->  queue/ job file
-
-   job -> 1 collect   notes vault | active task | git | GitHub | own logs     (read-only)
-          2 gate 1    tier: path floor, tags, terms. Hit = held, file never opened
-          3 router    (stub, or the local model) classifies what is left
-          4 gate 2,3  importance, then confidence: where may this go?
-          5 seal      clear_for_claude -> GatedPayload, the only type Claude accepts
-          6 claude    ONE batched `claude -p`: no tools, no MCP, no settings, capped spend
-          7 render    deterministic body, Claude's summary on top, held items listed
-          8 write     the single vault writer: raw/jarvis/digest-<date>.md
-          9 notify    toast, optional ntfy push (counts only)
-
-   every step -> hash-chained audit log (ids, counts, hashes, never text)
-   guards: state/KILL, pause, daily budget ledger, circuit breaker
-   read-only views: jarvis CLI, jarvis hub (loopback web page)
-```
-
-More in `docs/architecture.md`.
+1. Run a real model through the audit steps and the benchmark script, then decide on the hardware question the design leaves open.
+2. Add a held-item triage job, so sensitive items are summarized locally instead of only held.
+3. Validate the optional parts against the real services (ClickUp connector, ntfy server) and look at the hub page in a browser.
+4. Trip the elevated kill switch once against the live daemon, at the machine, and recover from it (see "How to verify" in the [patch](docs/killswitch-v1-patch.md)).
+5. Take later phases only where they earn their place: security tooling, retrieval, perception, voice.
 
 ## Privacy model
 
@@ -54,36 +110,9 @@ More in `docs/architecture.md`.
 - **Isolated Claude argv.** Claude is started only from `jarvisd/claude.py`, with a list argv, no shell, an empty working directory, a scrubbed environment, `--tools ""` and `--strict-mcp-config`. Only a sealed `GatedPayload` is accepted, and the final prompt is scanned once more. One optional call is an exception, see below.
 - **Audit chain.** Every action appends to a hash-chained JSONL log. `jarvis audit verify` walks it, and each digest carries the chain head so a later rewrite can be noticed.
 
-**The one exception to the isolated argv is the optional ClickUp section, which is off by default (`clickup_enabled = false`).** Its call passes neither `--tools ""` nor `--strict-mcp-config`, because the ClickUp connector is not in a config file and has to stay visible. Every other connector and MCP server of the logged-in account is then visible to the model too and is only refused: by an allowlist of two read tools, a denylist that is a snapshot of the connector's tools on 2026-10-05, and `--permission-prompts none`. A tool the connector adds later is blocked by the permission mode alone. The call carries a constant prompt and no vault text, but its reply is untrusted input. Read the injection surface in `docs/v1-operations.md` before turning it on.
+**The one exception to the isolated argv is the optional ClickUp section, which is off by default (`clickup_enabled = false`).** Its call passes neither `--tools ""` nor `--strict-mcp-config`, because the ClickUp connector is not in a config file and has to stay visible. Every other connector and MCP server of the logged-in account is then visible to the model too and is only refused: by an allowlist of two read tools, a denylist that is a snapshot of the connector's tools on 2026-10-05, and `--permission-prompts none`. A tool the connector adds later is blocked by the permission mode alone. The call carries a constant prompt and no vault text, but its reply is untrusted input. Read the injection surface in [operations](docs/v1-operations.md) before turning it on.
 
-## Install and first run
-
-You need Windows 11, Python 3.12 and git. `setup-venv.ps1` looks for the per-user python.org install, then for the `py` launcher; for any other install pass `-Python <path-to-python.exe>`. A logged-in Claude Code CLI is optional: without it every command still works and the digest is built deterministically. `gh` is optional for the GitHub section.
-
-```powershell
-git clone https://github.com/thelordofpigeons/jarvis.git
-cd jarvis
-powershell -NoProfile -ExecutionPolicy Bypass -File deploy\setup-venv.ps1    # add -Python <path> if needed
-copy jarvis.local.toml.example jarvis.local.toml
-```
-
-On another platform or without PowerShell, `pip install -r requirements.lock` in a Python 3.12 virtualenv gives the tested set, and `pip install ".[hub]"` adds the hub's dependencies to a plain install. Windows is the supported target.
-
-Edit `jarvis.local.toml`. It is gitignored and is the only place your repository list, sensitive terms and private paths belong. The daemon expects a Markdown notes folder at `~/brain` (move it with `vault_write_raw` and `vault_write_sessions` under `[paths]`), laid out as described in `docs/vault-layout.md`: with no `RECENT.md` and no session notes the digest is empty, which is the right answer for an empty input. Then:
-
-```powershell
-.\jarvis.cmd self-test                  # every line PASS, or an explained SKIP
-.\jarvis.cmd run-digest --dry-run       # prints the exact payload and the held list, writes nothing
-.\jarvis.cmd run-digest                 # deterministic digest, no Claude
-.\jarvis.cmd run-digest --claude --force   # the first paid call, capped by jarvis.toml (--force: today's digest already exists)
-powershell -NoProfile -ExecutionPolicy Bypass -File deploy\register-jarvisd-task.ps1 -WhatIf
-.venv\Scripts\python.exe -m pytest -q   # the offline suite; it never calls Claude
-.venv\Scripts\python.exe bin\watchdog.py --self-test   # the phase 0 config and dependency check
-```
-
-Read the dry-run output before the first `--claude` run: it is the exact text that would leave the machine. Drop `-WhatIf` to register the scheduled task. The full first-run checklist, stop and pause paths and the incident runbook are in `docs/v1-operations.md`.
-
-## Commands
+## CLI
 
 `jarvis` is `jarvis.cmd` in the repository root, or `python -m jarvisd`. Exit codes: 0 ok, 1 failure, 2 usage, 3 refused by a safety control.
 
@@ -107,10 +136,6 @@ Read the dry-run output before the first `--claude` run: it is the exact text th
 | `jarvis self-test` | PASS, FAIL and SKIP checks; exit 1 on any FAIL |
 | `jarvis install-task` | print or run the Task Scheduler registration |
 
-## Cost
-
-One real digest call is recorded in `docs/first-run-log.md`: 0.0068 USD for a small payload (4 items to Claude, 961 cache-creation input tokens, 295 output tokens). It is one measurement, not a range; a larger payload costs more, and `jarvis audit cost --days 7` sums what your own runs settled. Three limits apply before any call is spawned: a per-call cap (`max_budget_usd`, 0.50), a daily ledger (`daily_budget_usd`, 2.00, at most 6 calls) and a circuit breaker that opens after repeated failures or a rate limit and stays open until it clears or, after a privacy event, until a human resets it. `jarvis audit cost --days 7` sums what was actually settled. The deterministic digest costs nothing.
-
 ## What this is not
 
 - **Not sandboxed.** The v1 daemon runs as the human account, because the Claude login, the repositories and the toast all live there. The Phase 0 sandbox and account isolation do not constrain it. The controls are in code (the tier gate, the sealed payload, one writer, the ledger and breaker), not in an operating-system boundary.
@@ -120,27 +145,23 @@ One real digest call is recorded in `docs/first-run-log.md`: 0.0068 USD for a sm
 - **Not 24/7.** It is resident while the machine is awake and the user is logged on. A sleep through 06:30 gives a late digest.
 - **Not a finished product.** It is one person's tool, written for one person's vault layout. Expect to adapt the collectors.
 
-## Roadmap
+## Cost
 
-1. Run a real model through the audit steps and the benchmark script, then decide on the hardware question the design leaves open.
-2. A held-item triage job, so sensitive items are summarized locally instead of only held.
-3. Validate the optional parts against the real services (ClickUp connector, ntfy server) and look at the hub page in a browser.
-4. Trip the elevated kill switch once against the live daemon, at the machine, and recover from it (`docs/killswitch-v1-patch.md`, "How to verify"). The simulation passes; the real path has not been exercised.
-5. Later phases only where they earn their place: security tooling, retrieval, perception, voice.
+One real digest call is recorded in [first-run log](docs/first-run-log.md): 0.0068 USD for a small payload (4 items to Claude, 961 cache-creation input tokens, 295 output tokens). It is one measurement, not a range; a larger payload costs more, and `jarvis audit cost --days 7` sums what your own runs settled. Three limits apply before any call is spawned: a per-call cap (`max_budget_usd`, 0.50), a daily ledger (`daily_budget_usd`, 2.00, at most 6 calls) and a circuit breaker that opens after repeated failures or a rate limit and stays open until it clears or, after a privacy event, until a human resets it. The deterministic digest costs nothing.
 
-## Documentation
+## Docs
 
-- `docs/architecture.md`: processes, layers, modules, gates and the Claude call.
-- `docs/v1-operations.md`: the operator manual: start, stop, pause, audit, incident runbook, known gaps.
-- `docs/first-run-log.md`: what the first real run showed.
-- `docs/vault-layout.md`: what the notes collector reads, what it writes, and what a fresh install shows.
-- `docs/publishing.md`: the rules for publishing the repository, including its history.
-- `docs/v1-design.md` and `docs/v1-plan.md`: the full design with its decisions and the build plan.
-- `docs/phase0.md`, `docs/phase0-runbook.md` and `docs/sandbox-policy.md`: isolation, the kill switch and the sandbox policy.
-- `docs/killswitch-v1-patch.md`: how the kill switch was extended to the v1 daemon, what it does step by step, and how to verify it.
-- `docs/local-tier.md`, `docs/hub.md`, `docs/consolidation.md` and `docs/notify-ntfy.md`: the optional parts, each with its status on top.
-- `CHANGELOG.md`, `CONTRIBUTING.md` and `CITATION.cff`.
+- [Architecture](docs/architecture.md): processes, layers, modules, gates and the Claude call.
+- [Operations](docs/v1-operations.md): the operator manual: start, stop, pause, audit, incident runbook, known gaps.
+- [First-run log](docs/first-run-log.md): what the first real run showed.
+- [Vault layout](docs/vault-layout.md): what the notes collector reads, what it writes, and what a fresh install shows.
+- [Publishing](docs/publishing.md): the rules for publishing the repository, including its history.
+- [Design](docs/v1-design.md) and [plan](docs/v1-plan.md): the full design with its decisions and the build plan.
+- [Phase 0](docs/phase0.md), [runbook](docs/phase0-runbook.md) and [sandbox policy](docs/sandbox-policy.md): isolation, the kill switch and the sandbox policy.
+- [Kill switch v1 patch](docs/killswitch-v1-patch.md): how the kill switch was extended to the v1 daemon, what it does step by step, and how to verify it.
+- Optional parts, each with its status on top: [local tier](docs/local-tier.md), [hub](docs/hub.md), [consolidation](docs/consolidation.md) and [ntfy](docs/notify-ntfy.md).
+- [Changelog](CHANGELOG.md), [contributing](CONTRIBUTING.md) and [citation](CITATION.cff).
 
 ## License
 
-MIT, see `LICENSE`.
+MIT, see [LICENSE](LICENSE).
