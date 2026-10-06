@@ -5,7 +5,39 @@ machine. The format follows Keep a Changelog; versions are not published to PyPI
 
 ## Unreleased
 
-Nothing yet.
+The work hub moves from a viewer to a cockpit that can turn a proposal into a task, and only on a
+click. The version number is chosen at release (planned: 1.2.0). Each entry says what was run.
+Nothing below spent money: no paid proposals run was made and ClickUp was never called. The hub
+is no longer GET only: the Inbox adds three POST routes.
+
+### Added: built and tested offline
+- Q1, task proposals (`jarvis propose`, `jarvis proposals`, `jarvisd/propose.py`, `docs/proposals.md`):
+  one capped Claude call turns the latest complete digest run's cleared items into at most
+  `[propose].max_proposals` proposals under `state/proposals/`. Same gates, sealed payload and
+  isolated argv as the digest; held items appear as ids only; every evidence id is checked against
+  what was sent; the 20 newest rejected proposals are sent back as negative examples. Off by
+  default. Only the dry run was ever executed against real state.
+- Q2, tracker adapters (`jarvis tracker check`, `jarvisd/tracker.py`): a `markdown` adapter that
+  appends to `raw/jarvis/confirmed-tasks.md` through the single vault writer, and a `clickup`
+  adapter that creates one task through the ClickUp REST API with a token read from a named
+  environment variable. A `dry_run` switch logs the exact request instead of sending it, and
+  every attempt is audited. The ClickUp adapter has only met a local stand-in server.
+- Q3, Projects and Ledger views in the hub: one row per configured repository with fixed-rule
+  risks, and a record of what was delivered, built from the digest notes, the proposals and the
+  run manifests. They run no git and ask no model. New keys `[hub].stale_days` and
+  `[hub.task_projects]`.
+- Q4, the Inbox (`jarvisd/inbox.py`, `jarvisd/hub/inbox.py`, `tests/test_inbox.py`): confirm,
+  edit then confirm, and reject, from the hub and from `jarvis proposals confirm|reject`, through one
+  implementation. The first write actions in the hub: three POST routes behind a per-process CSRF
+  token and an Origin and Host check, a decision is made once under a cross-process lock, the
+  tracker is asked before the file is written, a reject needs a reason, and every write is audited
+  by id only. Tested with a fake tracker; no real proposal has been decided.
+- Q5, documentation: `docs/proposals.md`, an updated `docs/hub.md`, and the README status row and
+  command table. `jarvis.local.toml.example` carries synthetic `[tracker]` entries.
+
+### Changed
+- `[propose]` and `[tracker]` tables are appended to `jarvis.toml` (both adapters and the job are
+  inert by default). `models.Proposal.tracker_ref` accepts a `file:` link as well as http and https.
 
 ## 1.1.0 - 2026-10-05
 

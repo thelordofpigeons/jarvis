@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 from jarvisd.config import Config
 from jarvisd.hub.app import LOOPBACK_HOST, create_app
 
-VIEWS = (("Today", "/"), ("Runs", "/runs"), ("Held", "/held"), ("Repos", "/repos"), ("Projects", "/projects"),
+VIEWS = (("Today", "/"), ("Inbox", "/inbox"), ("Runs", "/runs"), ("Held", "/held"), ("Repos", "/repos"), ("Projects", "/projects"),
          ("Ledger", "/ledger"), ("Audit", "/audit"),
          ("Status", "/status"))
 

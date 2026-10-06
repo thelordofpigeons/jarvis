@@ -190,8 +190,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--force", action="store_true",
                    help="run although [propose].enabled is false, and again on a date that already ran")
 
-    p = sub.add_parser("proposals", help="list the task proposals under state/proposals")
+    p = sub.add_parser("proposals", help="list the task proposals under state/proposals; confirm or reject one")
     p.add_argument("--all", action="store_true", help="include confirmed, edited and rejected proposals")
+    proposals_sub = p.add_subparsers(dest="proposals_command", required=False, metavar="action")
+    q = proposals_sub.add_parser("confirm", help="create the task in the configured tracker and mark the proposal confirmed")
+    q.add_argument("id", help="the proposal id, as `jarvis proposals` lists it")
+    q.add_argument("--title", default=None, help="edit: replace the title before confirming")
+    q.add_argument("--project", default=None, help="edit: replace the project before confirming")
+    q.add_argument("--due", default=None, metavar="YYYY-MM-DD", help="edit: set the due date before confirming")
+    q = proposals_sub.add_parser("reject", help="reject a proposal; the reason teaches the next proposals run")
+    q.add_argument("id", help="the proposal id")
+    q.add_argument("--reason", required=True, help="why (required)")
 
     p = sub.add_parser("clickup", help="ClickUp section: verify the claude -p flag set on this machine")
     clickup_sub = p.add_subparsers(dest="clickup_command", required=True, metavar="action")
@@ -885,8 +894,10 @@ def cmd_propose(ctx: Ctx, args: argparse.Namespace) -> int:
 
 
 def cmd_proposals(ctx: Ctx, args: argparse.Namespace) -> int:
-    from jarvisd import propose
+    from jarvisd import inbox, propose
 
+    if getattr(args, "proposals_command", None) in ("confirm", "reject"):
+        return inbox.cmd_decide(ctx, args)  # the same functions the hub's Inbox forms call
     return propose.cmd_proposals(ctx, args)
 
 

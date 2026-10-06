@@ -119,6 +119,22 @@ p { margin: 0.5rem 0; }
 }
 .banner.bad { background: var(--bad-bg); color: var(--bad); }
 .banner.warn { background: var(--warn-bg); color: var(--warn); }
+.banner.ok { background: var(--ok-bg); color: var(--ok); }
+.actions { display: flex; flex-wrap: wrap; gap: 0.6rem 1rem; align-items: flex-start; margin-top: 0.8rem; }
+.actions details { flex: 1 1 16rem; border: 1px solid var(--line); border-radius: var(--radius); padding: 0.4rem 0.7rem; }
+.actions summary { cursor: pointer; }
+form.stack { display: grid; gap: 0.5rem; margin-top: 0.5rem; }
+form.stack label { display: grid; gap: 0.2rem; font-size: 0.9rem; color: var(--muted); }
+input[type="text"], input[type="date"] {
+  font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 6px; padding: 0.35rem 0.5rem; width: 100%; box-sizing: border-box;
+}
+button {
+  font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 0.4rem 0.9rem; cursor: pointer;
+}
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .card {
   background: var(--panel);
   border: 1px solid var(--line);

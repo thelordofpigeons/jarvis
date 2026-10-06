@@ -17,7 +17,7 @@ from typing import Any
 from jarvisd.common import parse_iso
 from jarvisd.hub.mdhtml import render_markdown
 
-NAV = (("/", "Today"), ("/runs", "Runs"), ("/held", "Held"), ("/repos", "Repos"), ("/projects", "Projects"),
+NAV = (("/", "Today"), ("/inbox", "Inbox"), ("/runs", "Runs"), ("/held", "Held"), ("/repos", "Repos"), ("/projects", "Projects"),
        ("/ledger", "Ledger"), ("/audit", "Audit"), ("/status", "Status"))
 WRONG_CHOICES = "escalate, hold, skip or other"
 
@@ -90,8 +90,8 @@ def page(title: str, active: str, content: str, *, flags: dict[str, Any], refres
         '<header class="top"><div class="bar"><span class="brand">JARVIS hub</span>'
         f'<nav aria-label="Views">{nav}</nav>{live}</div></header>'
         f'<main id="main">{banners}{content}</main>'
-        '<footer>Read-only cockpit: it reads state, queue, audit and the digest notes, and never writes or '
-        'calls Claude. <span id="stamp"></span></footer>'
+        '<footer>Read-only cockpit: it reads state, queue, audit and the digest notes and never calls Claude. '
+        'The one thing it writes is a decision you click in the Inbox. <span id="stamp"></span></footer>'
         f"{script}</body></html>\n")
 
 

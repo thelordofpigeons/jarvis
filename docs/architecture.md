@@ -53,7 +53,7 @@ write files and who may read them are enforced by AST tests in `tests/test_write
 - L0 `common`, `config`, `models`: helpers, typed settings, pydantic models.
 - L1 `fsio`, `audit`, `state`, `jobstore`, `vault`: durable IO behind small classes.
 - L2 `tier`, `router`, `dispatch`, `claude`: policy, and the one subprocess call site.
-- L3 `collectors/*`, `render`, `digest`, `notify`, `local`, `ask`, `consolidate`, `propose`, `hub/*`: job logic.
+- L3 `collectors/*`, `render`, `digest`, `notify`, `local`, `ask`, `consolidate`, `propose`, `inbox`, `hub/*`: job logic.
 - L4 `scheduler`, `daemon`, `cli`, `selftest`: wiring.
 
 Folders, all relative to the repository root unless they start with `~`:
@@ -95,13 +95,14 @@ Folders, all relative to the repository root unless they start with `~`:
 | `jarvisd/consolidate.py` | nightly memory candidates (see `docs/consolidation.md`) |
 | `jarvisd/propose.py` | task proposals from the latest complete digest run, one gated payload and one capped call, written to `state/proposals/`; creates nothing in a tracker |
 | `jarvisd/tracker.py` | tracker adapters behind one Protocol: markdown (default, through the vault writer) and ClickUp (REST, token from the environment); a human click in the Inbox is the only caller |
+| `jarvisd/inbox.py` | the Inbox decisions, shared by the hub forms and `jarvis proposals confirm` and `reject`: one lock, tracker first and file second, one atomic write, audited |
 | `jarvisd/notify.py` | notifier protocol: Windows toast, ntfy push (`docs/notify-ntfy.md`), a null notifier |
 | `jarvisd/vault.py` | the only code that writes into the notes vault, three allowed places, enforced by an AST test |
 | `jarvisd/scheduler.py` | idempotent `reconcile` and the APScheduler host |
 | `jarvisd/daemon.py` | composition root and the resident loop |
 | `jarvisd/cli.py` | the `jarvis` command line |
 | `jarvisd/selftest.py` | PASS, FAIL and SKIP checks for `jarvis self-test` |
-| `jarvisd/hub/` | the read-only web page on loopback (`docs/hub.md`); it imports the layers below it and nothing imports it |
+| `jarvisd/hub/` | the web page on loopback (`docs/hub.md`), read-only except the three Inbox POST routes; it imports the layers below it and nothing imports it |
 
 Dependencies: pydantic, APScheduler 3.x (a ticker, behind a small host class), pytest, and for the
 hub only fastapi and uvicorn (plus httpx2 for its tests); `docs/hub.md` justifies each pin. Not

@@ -10,7 +10,7 @@
 
 ## At a glance
 
-- **Every morning** the resident daemon `jarvisd` reads a notes vault, the active task, local git repositories, GitHub state and its own logs, and writes one digest note. Version 1 is observe-only and never acts outward.
+- **Every morning** the resident daemon `jarvisd` reads a notes vault, the active task, local git repositories, GitHub state and its own logs, and writes one digest note. The digest is observe-only: a task reaches a tracker only when you confirm a proposal in the hub Inbox.
 - **Safety comes from code, not from a prompt.** A deterministic tier gate decides what must stay on the machine before anything is read into a payload, and the single batched `claude -p` call runs with no tools, an isolated flag set and a daily budget cap.
 - **Not built:** an operating-system sandbox around the daemon, any benchmarked local model, security tooling runs, retrieval, perception and voice. The status table says which parts were run and which were only tested against fakes.
 
@@ -57,7 +57,7 @@ The Task Scheduler entry `JarvisDaemon` starts one resident Python process. It t
 8. **Write:** the single vault writer creates `raw/jarvis/digest-<date>.md`.
 9. **Notify:** a toast, and an optional ntfy push that carries counts only.
 
-Every step appends to a hash-chained audit log that holds ids, counts and hashes, never text. The guards are `state/KILL`, pause, the daily budget ledger and a circuit breaker. The read-only views are the `jarvis` CLI and `jarvis hub`, a loopback web page. More in [architecture](docs/architecture.md).
+Every step appends to a hash-chained audit log that holds ids, counts and hashes, never text. The guards are `state/KILL`, pause, the daily budget ledger and a circuit breaker. The views are the `jarvis` CLI and `jarvis hub`, a loopback web page. More in [architecture](docs/architecture.md).
 
 ## Quick start
 
@@ -71,23 +71,23 @@ copy jarvis.local.toml.example jarvis.local.toml
 .\jarvis.cmd install-task
 ```
 
-`setup-venv.ps1` looks for the per-user python.org install, then for the `py` launcher; for any other install pass `-Python <path-to-python.exe>`. `jarvis.local.toml` is gitignored and is the only place your repository list, sensitive terms and private paths belong. The daemon expects a Markdown notes folder at `~/brain`, laid out as in [vault layout](docs/vault-layout.md). With no `RECENT.md` and no session notes the digest is empty, which is the right answer for an empty input.
+`setup-venv.ps1` looks for the per-user python.org install, then for the `py` launcher; for any other install pass `-Python <path-to-python.exe>`. `jarvis.local.toml` is gitignored and is the only place your repository list, sensitive terms and private paths belong. The daemon expects a Markdown notes folder at `~/brain`, laid out as in [vault layout](docs/vault-layout.md). With no `RECENT.md` and no session notes the digest is empty.
 
-Read the dry-run output before the first paid run, as it is the exact text that would leave the machine. Without a Claude login the digest is built deterministically. The first paid call is `.\jarvis.cmd run-digest --claude --force`, capped by `jarvis.toml`. The full first-run checklist, stop and pause paths and the incident runbook are in [operations](docs/v1-operations.md).
+Read the dry-run output before the first paid run, as it is the exact text that would leave the machine. Without a Claude login the digest is built deterministically. The first paid call is `.\jarvis.cmd run-digest --claude --force`, capped by `jarvis.toml`. The first-run checklist, stop and pause paths and incident runbook are in [operations](docs/v1-operations.md).
 
 Elsewhere, `pip install -r requirements.lock` in a Python 3.12 virtualenv gives the tested set, and `pip install ".[hub]"` adds the hub. Windows is the supported target. The offline test suite never calls Claude: `.venv\Scripts\python.exe -m pytest -q`.
 
 ## Status by phase
 
-Phases follow the build order in the [design](docs/v1-design.md). Legend: **Done** is built, tested and run for real by the author. **Adapter only** is built and tested against a fake, never run against the real service or model. **Not built** has no code.
+Phases follow the build order in the [design](docs/v1-design.md). Legend: **Done** is built, tested and run for real by the author, except pieces the row names as untested. **Adapter only** is built and tested against a fake, never run against the real service or model. **Not built** has no code.
 
 | Phase | Name | Status | What that means |
 |---|---|---|---|
 | 0 | Isolation | Done | Kill switch, watchdog, hostile-daemon simulation and a sandbox policy (`bin/kill-switch.ps1`, `bin/watchdog.py`, `srt-settings.json`). Ran on the author's machine; the sandbox runtime could not be proven end to end without Administrator, and the v1 daemon is not under it. The kill switch also finds and kills the v1 daemon ([patch](docs/killswitch-v1-patch.md)), proven against a stand-in daemon by the simulation (27 of 27 checks); a real trip against the live daemon has not been done. Record: [phase 0](docs/phase0.md) |
 | 1 | Inference base | Adapter only | `jarvisd/local.py` talks to a local llama-server on loopback and is tested against a fake server. No model was downloaded, `bin/bench.ps1` was never run, so there is no throughput, latency or accuracy number. Details: [local tier](docs/local-tier.md) |
-| 2 | Vertical slice | Done | The morning digest end to end: queue, scheduler, tier gate, router contract, audit, CLI, toast. Run by hand on the author's machine since 2026-10-05, with a real Claude call. The unattended 06:30 scheduled run has not been observed yet (see "What this is not") |
+| 2 | Vertical slice | Done | The morning digest end to end: queue, scheduler, tier gate, router contract, audit, CLI, toast. Run by hand on the author's machine since 2026-10-05, with a real Claude call. The unattended 06:30 run has not been observed (see "What this is not") |
 | 3 | Claude bridge | Done | The `claude -p` subprocess bridge with its budget ledger and breaker (`jarvisd/claude.py`) is used live. The Agent SDK escalation and claude-code-router are not built, by decision |
-| 4 | Work hub | Adapter only | The read-only web page (`jarvisd/hub/app.py`) and `jarvis ask` are built and tested; the page was not reviewed in a browser by its tests. GitHub, ClickUp and ntfy push are adapters tested against fakes. Not built: Slack, held-item triage, Inbox and Projects views, any action from the page |
+| 4 | Work hub | Done | Inbox, Projects, Ledger and tracker write-back: Done; local triage model: Not built; Slack and reminders: Not built. The page (`jarvisd/hub/app.py`), `jarvis ask`, `jarvis propose` and the tracker adapters are tested offline: no paid proposals run, creating a task in ClickUp met only a fake server, and no test viewed the page in a browser. GitHub, the ClickUp section and ntfy are adapters tested against fakes. See [hub](docs/hub.md) and [proposals](docs/proposals.md) |
 | 5 | Consolidation | Adapter only | `jarvisd/consolidate.py` proposes memory candidates from session notes. Off by default and never run against the real model. Details: [consolidation](docs/consolidation.md) |
 | 6 | Security widening | Not built | No garak, promptfoo or mcp-scan run exists. Only the phase 0 kill-switch simulation is real |
 | 7 | Retrieval | Not built | Native search of the notes tool is used instead |
@@ -100,7 +100,6 @@ Next steps, in order:
 2. Add a held-item triage job, so sensitive items are summarized locally instead of only held.
 3. Validate the optional parts against the real services (ClickUp connector, ntfy server) and look at the hub page in a browser.
 4. Trip the elevated kill switch once against the live daemon, at the machine, and recover from it (see "How to verify" in the [patch](docs/killswitch-v1-patch.md)).
-5. Take later phases only where they earn their place.
 
 ## Privacy model
 
@@ -132,7 +131,7 @@ Next steps, in order:
 | `jarvis hub` | the read-only web page on loopback; `--check` renders every view |
 | `jarvis ask` | answer one question from the latest digest and notes, one capped call |
 | `jarvis consolidate` | propose memory candidates from session notes (off by default) |
-| `jarvis propose` `jarvis proposals` | make, then list, task proposals (off by default) |
+| `jarvis propose` `jarvis proposals` | make task proposals (off by default), list, `confirm` or `reject` them |
 | `jarvis clickup` | `check` the flag set for the optional ClickUp section; `--live` makes one paid call |
 | `jarvis tracker` | `check` which task tracker is ready; sends nothing |
 | `jarvis self-test` | PASS, FAIL and SKIP checks; exit 1 on any FAIL |
@@ -154,14 +153,14 @@ One real digest call is recorded in [first-run log](docs/first-run-log.md): 0.00
 ## Docs
 
 - [Architecture](docs/architecture.md): processes, layers, modules, gates and the Claude call.
-- [Operator manual](docs/v1-operations.md): start, stop, pause, audit, incident runbook, known gaps.
-- [First-run log](docs/first-run-log.md): what the first real run showed.
-- [Vault layout](docs/vault-layout.md): what the notes collector reads, what it writes, and what a fresh install shows.
-- [Publishing](docs/publishing.md): the rules for publishing the repository, including its history.
-- [Design](docs/v1-design.md) and [plan](docs/v1-plan.md): the design, its decisions and the build plan.
-- [Phase 0](docs/phase0.md), [runbook](docs/phase0-runbook.md) and [sandbox policy](docs/sandbox-policy.md): isolation, the kill switch and the sandbox policy.
-- [Kill switch v1 patch](docs/killswitch-v1-patch.md): how the kill switch was extended to the v1 daemon, what it does step by step, and how to verify it.
-- Optional parts, each with its status on top: [local tier](docs/local-tier.md), [hub](docs/hub.md), [consolidation](docs/consolidation.md) and [ntfy](docs/notify-ntfy.md).
+- [Operator manual](docs/v1-operations.md): start, stop, pause, audit, incidents, known gaps.
+- [First-run log](docs/first-run-log.md): the first real run.
+- [Vault layout](docs/vault-layout.md): what the notes collector reads and writes.
+- [Publishing](docs/publishing.md): the rules for publishing, history included.
+- [Design](docs/v1-design.md) and [plan](docs/v1-plan.md): the design, its decisions and the build order.
+- [Phase 0](docs/phase0.md), [runbook](docs/phase0-runbook.md) and [sandbox policy](docs/sandbox-policy.md): isolation and the kill switch.
+- [Kill switch v1 patch](docs/killswitch-v1-patch.md): how the kill switch reaches the v1 daemon, and how to verify it.
+- Optional parts, each with its status on top: [local tier](docs/local-tier.md), [hub](docs/hub.md), [proposals](docs/proposals.md), [consolidation](docs/consolidation.md) and [ntfy](docs/notify-ntfy.md).
 - [Changelog](CHANGELOG.md), [contributing](CONTRIBUTING.md) and [citation](CITATION.cff).
 
 ## License
