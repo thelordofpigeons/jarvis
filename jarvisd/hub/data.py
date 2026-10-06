@@ -395,6 +395,31 @@ class HubData:
                         "decided_at": decided})
         return out
 
+    def reminders(self) -> list[dict[str, Any]]:
+        """Due dates of accepted and still-open proposals, soonest first. Rejected proposals and ones with no
+        usable date are left out. An edited due date beats the model's hint. No tracker is asked: ClickUp due
+        dates reach the hub only through the digest, so this is the part that is known locally."""
+        today = self.now().date()
+        out: list[dict[str, Any]] = []
+        for path in _json_files(self.state_dir / "proposals"):
+            raw = _read_json(path)
+            if not isinstance(raw, dict) or raw.get("status") not in ("proposed", "confirmed", "edited_confirmed"):
+                continue
+            edits = raw.get("edits")
+            text = (edits.get("due") if isinstance(edits, dict) else None) or raw.get("due_hint")
+            try:
+                due = date.fromisoformat(str(text))
+            except ValueError:
+                continue
+            days = (due - today).days
+            ref = raw.get("tracker_ref")
+            out.append({"id": str(raw.get("id") or path.stem), "title": str(raw.get("title") or ""),
+                        "project": str(raw.get("project") or ""), "status": str(raw["status"]),
+                        "accepted": raw["status"] != "proposed", "due": due.isoformat(), "days": days,
+                        "bucket": "overdue" if days < 0 else "today" if days == 0 else "soon" if days <= 7 else "later",
+                        "tracker_ref": ref if isinstance(ref, str) and ref else None})
+        return sorted(out, key=lambda r: (r["due"], r["id"]))
+
     def _digest_history(self) -> list[dict[str, Any]]:
         """Parsed Repos and Active task sections of the newest digest notes, oldest first, one per day."""
         by_day: dict[date, dict[str, Any]] = {}

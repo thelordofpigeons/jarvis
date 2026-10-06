@@ -18,7 +18,7 @@ from jarvisd.config import Config
 from jarvisd.hub.app import LOOPBACK_HOST, create_app
 
 VIEWS = (("Today", "/"), ("Inbox", "/inbox"), ("Runs", "/runs"), ("Held", "/held"), ("Repos", "/repos"), ("Projects", "/projects"),
-         ("Ledger", "/ledger"), ("Audit", "/audit"),
+         ("Ledger", "/ledger"), ("Reminders", "/reminders"), ("Audit", "/audit"),
          ("Status", "/status"))
 
 

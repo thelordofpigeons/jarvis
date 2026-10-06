@@ -5,6 +5,9 @@ machine. The format follows Keep a Changelog; versions are not published to PyPI
 
 ## 1.2.0 - 2026-10-06
 
+- Reminders view in the hub (`/reminders`, `HubData.reminders`): due dates of confirmed and open proposals, grouped by
+  how late they are. Read only, no tracker call, nothing pushed. Tested offline (`tests/test_hub_reminders.py`).
+
 The work hub moves from a viewer to a cockpit that can turn a proposal into a task, and only on a
 human decision. Each entry says what was run. Nothing below spent money: no paid proposals run was
 made and ClickUp was never called. The hub is no longer GET only: the Inbox adds three POST routes.

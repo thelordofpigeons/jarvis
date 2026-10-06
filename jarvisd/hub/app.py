@@ -229,6 +229,10 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port
     def ledger_view() -> HTMLResponse:
         return render("Ledger", "Ledger", views.ledger(data.ledger()))
 
+    @app.get("/reminders", response_class=HTMLResponse)
+    def reminders_view() -> HTMLResponse:
+        return render("Reminders", "Reminders", views.reminders(data.reminders()))
+
     @app.get("/audit", response_class=HTMLResponse)
     def audit_view() -> HTMLResponse:
         limit = cfg.hub.audit_rows

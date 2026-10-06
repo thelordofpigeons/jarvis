@@ -18,7 +18,7 @@ from jarvisd.common import parse_iso
 from jarvisd.hub.mdhtml import render_markdown
 
 NAV = (("/", "Today"), ("/inbox", "Inbox"), ("/runs", "Runs"), ("/held", "Held"), ("/repos", "Repos"), ("/projects", "Projects"),
-       ("/ledger", "Ledger"), ("/audit", "Audit"), ("/status", "Status"))
+       ("/ledger", "Ledger"), ("/reminders", "Reminders"), ("/audit", "Audit"), ("/status", "Status"))
 WRONG_CHOICES = "escalate, hold, skip or other"
 
 
@@ -275,6 +275,32 @@ def ledger(data: dict[str, Any]) -> str:
                                                  ("Notes", "num"), ("Proposal runs", "num"), ("USD", "num")], roll)
             + "<h2>Delivered</h2>" + table([("When", ""), ("Kind", ""), ("What", ""), ("USD", "num"),
                                             ("Evidence", "")], rows))
+
+
+def reminders(rows: list[dict[str, Any]]) -> str:
+    head = ('<h1>Reminders</h1><p class="lede">Due dates of confirmed proposals and of proposals still waiting in the '
+            "Inbox, soonest first. Read from the proposals folder; no tracker is asked and nothing is pushed from here. "
+            "A proposal's edited due date beats the model's hint.</p>")
+    if not rows:
+        return head + '<p class="empty">No reminders: no live proposal carries a due date.</p>'
+    names = (("overdue", "Overdue", "bad"), ("today", "Due today", "warn"), ("soon", "Next 7 days", ""), ("later", "Later", ""))
+    out = [head]
+    for key, label, kind in names:
+        group = [r for r in rows if r["bucket"] == key]
+        if not group:
+            continue
+        cells = []
+        for r in group:
+            href = _safe_href(r["tracker_ref"]) if r["tracker_ref"] else None
+            link = (f'<a href="{esc(href)}" rel="noreferrer">task</a>' if href
+                    else (esc(clip(r["tracker_ref"], 40)) if r["tracker_ref"] else ""))
+            when = f"{abs(r['days'])} days late" if r["days"] < 0 else ("today" if r["days"] == 0 else f"in {r['days']} days")
+            state = pill("accepted", "ok") if r["accepted"] else pill("awaiting decision")
+            cells.append([esc(r["due"]), esc(when), esc(clip(r["title"], 100)) + (f" {pill(r['project'])}" if r["project"] else ""),
+                          state, link])
+        out.append(f"<h2>{pill(label, kind)} {len(group)}</h2>" + table(
+            [("Due", ""), ("When", ""), ("What", ""), ("State", ""), ("Tracker", "")], cells))
+    return "".join(out)
 
 
 # --- Audit -----------------------------------------------------------------------------------------

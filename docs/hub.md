@@ -14,7 +14,7 @@ jarvis hub --check         # render every view once against the real state, then
 
 ## Status, stated plainly
 
-- **Built and tested:** the read-only views (Today, Runs, Held, Repos, Projects, Ledger, Audit,
+- **Built and tested:** the read-only views (Today, Runs, Held, Repos, Projects, Ledger, Reminders, Audit,
   Status), the Inbox with its three POST routes, the loopback, Host and Origin guards, the CSRF
   token, the read-only data layer and `jarvis hub --check`. The suites are `tests/test_hub.py`,
   `tests/test_hub_projects.py` and `tests/test_inbox.py`. They drive the real application through
@@ -25,7 +25,7 @@ jarvis hub --check         # render every view once against the real state, then
   ClickUp service, and a confirm of a proposal made by the real model (no paid proposals run has
   been made). Everything the Inbox does has met only a fake tracker, the markdown adapter on a
   throwaway vault and a local stand-in for ClickUp.
-- **Not built:** the Reminders view, local triage of events, Slack data, a SQLite index,
+- **Not built:** pushed reminders (ntfy), ClickUp due dates in the Reminders view, local triage of events, Slack data, a SQLite index,
   authentication, TLS. The page has no login because it listens on loopback only.
 - **Tested against fakes only:** the ClickUp adapter has never talked to the real ClickUp service,
   only to a local stand-in server. Use `dry_run` first (below).
@@ -46,6 +46,7 @@ jarvis hub --check         # render every view once against the real state, then
 | Projects | One row per repository in `[digest].repos`: branch, commits, uncommitted files, open pull requests, CI, days idle, risks, open proposals | the digest notes, `state/proposals/`, the config |
 | Ledger | What was delivered, newest first, and a rollup per month: confirmed proposals with their tracker link, digests written, consolidation notes, proposals runs, with the recorded cost | `state/proposals/`, `state/runs/<job>/run.json`, the digest notes |
 | Inbox | The proposals waiting for a decision, with confirm, edit and reject forms; each evidence id shows its digest line if it was cleared, and the id alone if it was held | `state/proposals/`, the digest note of the proposal's run |
+| Reminders | Due dates of confirmed proposals and of proposals still in the Inbox, grouped overdue, today, next 7 days, later; an edited due date beats the model's hint | `state/proposals/` |
 | Audit | Chain verification result, the newest events (default 50), today's budget | `logs/jarvisd-audit*.jsonl`, `state/budget.json` |
 | Status | The same lines `jarvis status` prints, plus the queue counts | `state/`, `queue/`, the audit log |
 
