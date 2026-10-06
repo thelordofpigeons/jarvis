@@ -250,6 +250,7 @@ timeout_s = 20                     # per gh call
 port = 8765
 refresh_s = 30                     # an open page re-fetches itself this often; 0 turns the script off
 audit_rows = 50                    # rows on the Audit view
+stale_days = 14                    # Projects view: stale badge after this many days without a commit, checkout or pull
 # allowed_hosts = []               # extra Host header names, for `tailscale serve`; the tailnet name is private, set it in jarvis.local.toml
 
 # ---------------------------------------------------------------------------------------
@@ -279,3 +280,42 @@ max_candidates = 8
 #   clickup_timeout_s = 75          # wait for that call
 #   clickup_allow_tool_search = false  # true only if the live check showed the connector tools need ToolSearch
 # ---------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------
+# Task proposals (jarvisd/propose.py, spec 1c "Proposals"). One Claude call turns the latest
+# complete digest run's cleared items, the rejected proposals so far and the repo facts into
+# at most max_proposals task proposals under state/proposals/. Nothing leaves the machine
+# except through the same gates as the digest, and nothing is created in a tracker until you
+# confirm a proposal in the Inbox. max_budget_usd caps that one call. run_after_digest queues
+# the job right after a complete digest. Off by default: one paid call a day.
+# ---------------------------------------------------------------------------------------
+
+[propose]
+enabled = false
+max_proposals = 8
+max_budget_usd = 0.30
+run_after_digest = true
+
+# ---------------------------------------------------------------------------------------
+# Plan Q2, appended: tracker adapters (jarvisd/tracker.py). A proposal confirmed by a click
+# in the hub Inbox becomes a task here, and only there. "markdown" appends to
+# brain/raw/jarvis/confirmed-tasks.md through the vault writer and sends nothing anywhere.
+# "clickup" posts to the ClickUp REST API. The ClickUp keys are listed as comments (a table
+# cannot be reopened in TOML); put real values in jarvis.local.toml, never here: list ids and
+# project names are private. The token VALUE is never in a file, only the NAME of the
+# environment variable that holds it. `jarvis tracker check` prints readiness and sends nothing.
+# ---------------------------------------------------------------------------------------
+
+[tracker]
+adapter = "markdown"               # markdown | clickup
+# clickup_token_env = "JARVIS_CLICKUP_TOKEN"   # NAME of the environment variable, never the token
+
+#   [tracker.clickup]
+#   default_list_id = ""            # digits; used when a project has no entry below
+#   status = ""                     # empty: the list's default status; statuses differ per space
+#   dry_run = false                 # true logs the exact request to the audit log and sends nothing
+#   timeout_s = 15.0
+#   api_base = "https://api.clickup.com/api/v2"   # http is accepted only for a loopback host
+#
+#   [tracker.clickup.lists]         # project name (as in the proposal) = ClickUp list id
+#   example-api = "901100"
