@@ -72,7 +72,7 @@ adapter = "toast"
 # --- work hub, Projects view ------------------------------------------------------------
 # Show the active task under a repo when its line contains one of the keywords (synthetic values).
 [hub.task_projects]
-example-repo = ["example keyword"]
+example-api = ["example keyword"]
 
 # --- plan Q2 ------------------------------------------------------------------------------
 # Tracker adapters (jarvisd/tracker.py). "markdown" is the default and needs nothing. For
@@ -87,7 +87,7 @@ clickup_token_env = "JARVIS_CLICKUP_TOKEN"
 [tracker.clickup]
 default_list_id = "901999"
 # status = "to do"
-# dry_run = true                  # log the exact request, send nothing
+# dry_run = true                  # build the exact request, show it in the Inbox, send nothing
 timeout_s = 15.0
 
 [tracker.clickup.lists]

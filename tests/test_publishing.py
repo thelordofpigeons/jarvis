@@ -94,14 +94,16 @@ def test_package_metadata_matches_the_released_version() -> None:
     assert meta["version"].split("-")[0] == __version__.split("-")[0]
 
 
-def test_changelog_has_the_two_releases_and_an_unreleased_section() -> None:
+def test_changelog_is_newest_first_and_its_top_entry_is_the_package_version() -> None:
     text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     assert text.startswith("# Changelog")
     headings = re.findall(r"^## (.+)$", text, re.MULTILINE)
-    assert headings[0] == "Unreleased"
+    # Either work in progress under "Unreleased", or the release that is checked in: then its heading is the
+    # package version and a date, so the file and the code cannot disagree about what the newest release is.
+    assert headings[0] == "Unreleased" or re.fullmatch(re.escape(__version__) + r" - \d{4}-\d{2}-\d{2}", headings[0])
     assert any(h.startswith("1.0.0-opt2") for h in headings)
     assert any(h.startswith("0.1.0") for h in headings)
-    assert headings.index("Unreleased") < next(i for i, h in enumerate(headings) if h.startswith("1.0.0-opt2"))
+    assert 0 < next(i for i, h in enumerate(headings) if h.startswith("1.0.0-opt2"))
     assert next(i for i, h in enumerate(headings) if h.startswith("1.0.0-opt2")) < next(
         i for i, h in enumerate(headings) if h.startswith("0.1.0"))
 

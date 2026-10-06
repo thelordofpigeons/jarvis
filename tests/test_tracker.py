@@ -323,18 +323,22 @@ def test_a_custom_token_env_name_is_honoured(tmp_cfg: Config, audit: AuditLog, f
 # --- ClickUp: dry run and the audit -----------------------------------------------------------
 
 
-def test_dry_run_logs_the_exact_request_and_sends_nothing(tmp_cfg: Config, audit: AuditLog, fake) -> None:  # type: ignore[no-untyped-def]
+def test_dry_run_returns_the_exact_request_and_sends_nothing(tmp_cfg: Config, audit: AuditLog, fake) -> None:  # type: ignore[no-untyped-def]
     server = fake()
     cfg = clickup_cfg(tmp_cfg, server, dry_run=True)
     result = tracker(cfg, audit).create_task(PROPOSAL, {})
     assert result.ok and result.dry_run and result.url is None and result.external_id is None
     assert server.requests == []
+    # The owner sees the request in the result; the audit chain keeps ids and counts only.
+    assert result.request is not None
+    sent = json.loads(result.request)
+    assert sent["name"] == PROPOSAL["title"] and "it-1a2b3c4d" in sent["description"]
     row = audit.records(events=["tracker_dry_run"])[0]
     assert row["method"] == "POST" and row["url"] == server.url + "/list/901100/task"
-    sent = json.loads(row["request_json"])
-    assert sent["name"] == PROPOSAL["title"] and "it-1a2b3c4d" in sent["description"]
-    assert row["authorization"] == "<redacted>"
-    assert TOKEN not in audit_text(audit)
+    assert row["authorization"] == "<redacted>" and row["bytes"] > 0 and len(row["sha256"]) == 64
+    assert "request_json" not in row
+    text = audit_text(audit)
+    assert PROPOSAL["title"] not in text and "Two reviewers" not in text and TOKEN not in text
 
 
 def test_dry_run_needs_no_token(tmp_cfg: Config, audit: AuditLog) -> None:
@@ -557,3 +561,102 @@ def test_evidence_with_whitespace_is_refused(tmp_cfg: Config, audit: AuditLog, f
     server = fake()
     result = tracker(clickup_cfg(tmp_cfg, server), audit).create_task({**PROPOSAL, "evidence": ["it-1 and some text"]}, {})
     assert not result.ok and result.error == "invalid_proposal:evidence" and server.requests == []
+
+
+# --- release 1.2.0: ambiguous outcomes, scans, markdown neutralizing, dry run --------------------------------------
+
+
+def test_a_dry_run_is_ready_without_a_token(tmp_cfg: Config, audit: AuditLog) -> None:
+    on = tracker(clickup_cfg(tmp_cfg, None, dry_run=True), audit, env={})
+    assert on.problems() == []
+    off = tracker(clickup_cfg(tmp_cfg, None, dry_run=False), audit, env={})
+    assert any("no ClickUp token" in p for p in off.problems())
+    # a missing list is still a problem in a dry run: the request could not be built
+    cfg = clickup_cfg(tmp_cfg, None, dry_run=True)
+    cfg.tracker.clickup.lists, cfg.tracker.clickup.default_list_id = {}, ""
+    assert any("no list configured" in p for p in tracker(cfg, audit, env={}).problems())
+
+
+@pytest.mark.parametrize("kind", ["timeout", "http_500", "bad_response", "network", "exception"])
+def test_outcomes_where_the_task_may_exist_are_flagged_unknown(tmp_cfg: Config, audit: AuditLog, fake, kind: str) -> None:  # type: ignore[no-untyped-def]
+    import urllib.error
+
+    class Stub:
+        def __init__(self, error: BaseException) -> None:
+            self.error = error
+
+        def open(self, *args: Any, **kwargs: Any) -> Any:
+            raise self.error
+
+    if kind == "timeout":
+        t = ClickUpTracker(clickup_cfg(tmp_cfg, None), audit, environ={ENV: TOKEN},
+                           opener=Stub(TimeoutError("read timed out")))
+    elif kind == "network":
+        t = ClickUpTracker(clickup_cfg(tmp_cfg, None), audit, environ={ENV: TOKEN},
+                           opener=Stub(urllib.error.URLError(ConnectionResetError(10054, "reset"))))
+    elif kind == "exception":
+        t = ClickUpTracker(clickup_cfg(tmp_cfg, None), audit, environ={ENV: TOKEN}, opener=Stub(RuntimeError("x")))
+    elif kind == "http_500":
+        t = tracker(clickup_cfg(tmp_cfg, fake(status=500)), audit)
+    else:
+        t = tracker(clickup_cfg(tmp_cfg, fake(status=200, body={"id": "not an id!"})), audit)
+    result = t.create_task(PROPOSAL, {})
+    assert not result.ok and result.unknown is True
+    assert audit.records(events=["tracker_result"])[-1]["outcome_unknown"] is True
+
+
+def test_outcomes_where_no_task_can_exist_are_not_unknown(tmp_cfg: Config, audit: AuditLog, fake) -> None:  # type: ignore[no-untyped-def]
+    import urllib.error
+
+    class Refused:
+        def open(self, *args: Any, **kwargs: Any) -> Any:
+            raise urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+
+    assert ClickUpTracker(clickup_cfg(tmp_cfg, None), audit, environ={ENV: TOKEN},
+                          opener=Refused()).create_task(PROPOSAL, {}).unknown is False
+    assert tracker(clickup_cfg(tmp_cfg, fake(status=401), ), audit).create_task(PROPOSAL, {}).unknown is False
+    assert tracker(clickup_cfg(tmp_cfg, fake(status=422), ), audit).create_task(PROPOSAL, {}).unknown is False
+    assert tracker(clickup_cfg(tmp_cfg, fake()), audit).create_task(PROPOSAL, {}).unknown is False
+    assert tracker(clickup_cfg(tmp_cfg, None), audit, env={}).create_task(PROPOSAL, {}).unknown is False
+
+
+def test_a_sensitive_term_in_the_title_or_rationale_stops_the_create_before_any_request(
+        tmp_cfg: Config, audit: AuditLog, fake) -> None:  # type: ignore[no-untyped-def]
+    server = fake()
+    cfg = clickup_cfg(tmp_cfg, server)
+    cfg.gates.sensitive_terms = ["zebra-codename"]
+    t = tracker(cfg, audit)
+    for edits in ({"title": "Ship the zebra-codename release"}, {"project": "Zebra-Codename"}):
+        result = t.create_task(PROPOSAL, edits)
+        assert not result.ok and result.error == "invalid_proposal:sensitive" and result.unknown is False
+    result = t.create_task({**PROPOSAL, "rationale": "About the ZEBRA-CODENAME work"}, {})
+    assert result.error == "invalid_proposal:sensitive"
+    assert server.requests == []
+    assert "zebra" not in audit_text(audit).casefold()
+    md = MarkdownTracker(cfg, VaultWriter(cfg, audit), audit)
+    assert md.create_task(PROPOSAL, {"title": "zebra-codename"}).error == "invalid_proposal:sensitive"
+    assert not (Path(cfg.paths.vault_write_raw) / "confirmed-tasks.md").exists()
+
+
+HOSTILE = "See ![x](https://attacker.example/p?d=abc) and [link](https://attacker.example/q) <img src=\"https://attacker.example/" + "z" * 120 + "\"> now"
+
+
+def test_markdown_block_neutralizes_images_links_and_html(tmp_cfg: Config, audit: AuditLog) -> None:
+    md = MarkdownTracker(tmp_cfg, VaultWriter(tmp_cfg, audit), audit)
+    result = md.create_task({**PROPOSAL, "rationale": HOSTILE, "title": "A ![t](https://attacker.example/t) title"}, {})
+    assert result.ok
+    text = (Path(tmp_cfg.paths.vault_write_raw) / "confirmed-tasks.md").read_text(encoding="utf-8")
+    assert "attacker.example" not in text and "![" not in text and "](" not in text and "<img" not in text
+    assert "See" in text and "link" in text and "now" in text
+
+
+def test_neutralize_markdown_unit() -> None:
+    from jarvisd.tracker import neutralize_markdown
+
+    assert neutralize_markdown("a ![x](https://e.example/p) b") == "a x b"
+    assert neutralize_markdown("a [t](https://e.example/p) b") == "a t b"
+    assert neutralize_markdown("a ![x][ref] b [y][r2]") == "a x b y"
+    assert neutralize_markdown("<https://e.example/p?q=1>") == ""
+    assert neutralize_markdown("plain 1 < 2 and 3 > 2") == "plain 1 < 2 and 3 > 2"
+    assert neutralize_markdown("![[Embedded note]]") == "Embedded note"
+    assert neutralize_markdown("nested ![a [b]](https://e.example/p)").count("e.example") == 0

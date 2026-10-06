@@ -11,8 +11,16 @@ nothing in the daemon creates a task on its own. Two adapters sit behind one Pro
   duplicate the task); redirects are refused so the token cannot travel to another host.
 
 Only proposal fields that already cleared the gates reach a request: title, project, rationale,
-evidence ids, due. Held items are never named here. Every outward attempt is audited (intent,
-then result), and `dry_run` logs the exact request instead of sending it.
+evidence ids, due. Held items are never named here. The text is scanned again by the tier gate
+when the task is built (a term added to the config after the proposal was made, or typed into an
+edit field, stops the create), and Markdown links, images and HTML are neutralized so a note
+that is opened in Obsidian cannot fetch a remote URL. Every outward attempt is audited (intent,
+then result), and `dry_run` builds the exact request and returns it to the caller instead of
+sending it. The audit chain keeps ids, sizes and a hash of that request, never its text.
+
+A result carries `unknown=True` when the task may exist although the call did not confirm it (a
+timeout, a dropped connection, a 5xx, an answer that is not a task). The Inbox then refuses a
+second create until the human says so, because a retry would duplicate the task.
 
 The proposal is read as a mapping or as an object with the same attribute names, so this module
 does not depend on how the proposal store models it.
@@ -35,6 +43,7 @@ from typing import Any, Protocol
 from jarvisd.audit import AuditLog
 from jarvisd.common import iso, local_now, sha256_hex, strip_dashes
 from jarvisd.config import Config
+from jarvisd.tier import TierViolation, assert_clean
 from jarvisd.vault import VaultWriteDenied, VaultWriter
 
 CONFIRMED_NAME = "confirmed-tasks.md"
@@ -50,6 +59,13 @@ _EVIDENCE_ID = re.compile(r"[^\s\x00-\x1f\x7f]{1,200}")
 _LIST_ID = re.compile(r"[0-9]{1,20}")
 _EXTERNAL_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _SPACES = re.compile(r"\s+")
+# Markdown that makes a viewer fetch or follow something. Nested brackets are allowed one level deep in alt text.
+_MD_ALT = r"((?:[^\[\]]|\[[^\]]*\])*)"
+_MD_INLINE = re.compile(r"!?\[" + _MD_ALT + r"\]\([^)]*\)")
+_MD_REFERENCE = re.compile(r"!?\[" + _MD_ALT + r"\]\[[^\]]*\]")
+_MD_DEFINITION = re.compile(r"^[ \t]{0,3}\[[^\]\n]+\]:.*$", re.MULTILINE)
+_MD_WIKILINK = re.compile(r"!?\[\[|\]\]")
+_HTML_TAG = re.compile(r"<[A-Za-z/!?][^<>]*>")
 _LOOPBACK = re.compile(r"^https?://(localhost|127(\.\d{1,3}){3}|\[::1\])(:\d+)?(/|$)", re.IGNORECASE)
 
 HEADER = (
@@ -72,6 +88,8 @@ class TrackerResult:
     external_id: str | None = None
     error: str | None = None
     dry_run: bool = False
+    unknown: bool = False  # not ok, yet the task may exist: never offer a plain retry
+    request: str | None = None  # dry run only: the exact request body, for the human, never audited
 
 
 class TrackerAdapter(Protocol):
@@ -111,8 +129,23 @@ def _field(obj: Any, key: str) -> Any:
     return getattr(obj, key, None)
 
 
+def neutralize_markdown(text: str) -> str:
+    """The text with links, images, reference definitions, wikilink and embed marks and HTML tags removed.
+
+    The visible words stay (`[label](url)` becomes `label`); the target goes. An image or a link
+    in a model-written line could otherwise make Obsidian or ClickUp fetch a URL that carries
+    cleared text. Plain `<` and `>` in prose ("1 < 2") are left alone: a tag needs a letter, `/`,
+    `!` or `?` right after the `<`.
+    """
+    text = _HTML_TAG.sub("", text)
+    text = _MD_INLINE.sub(r"\1", text)
+    text = _MD_REFERENCE.sub(r"\1", text)
+    text = _MD_DEFINITION.sub("", text)
+    return _MD_WIKILINK.sub("", text)  # last: removing `]]` earlier would break the bracket matching above
+
+
 def _one_line(value: Any, limit: int) -> str:
-    return strip_dashes(_SPACES.sub(" ", str(value))).strip()[:limit]
+    return strip_dashes(_SPACES.sub(" ", neutralize_markdown(str(value)))).strip()[:limit]
 
 
 def _parse_due(value: Any) -> date | datetime | None:
@@ -143,10 +176,13 @@ def normalize_edits(edits: Any) -> Mapping[str, Any]:
     return edits
 
 
-def resolve_spec(proposal: Any, edits: Mapping[str, Any] | None) -> TaskSpec:
+def resolve_spec(proposal: Any, edits: Mapping[str, Any] | None, cfg: Config | None = None) -> TaskSpec:
     """The proposal with the human's edits applied on top. Raises InvalidProposal(field).
 
-    The due date is the edit's `due`, else the proposal's `due`, else its `due_hint`.
+    The due date is the edit's `due`, else the proposal's `due`, else its `due_hint`. With `cfg`
+    the title, project, rationale and evidence ids are scanned by the tier gate as they will be
+    sent, so a term added to the config since the proposal was made, or typed into an edit
+    field, raises InvalidProposal("sensitive").
     """
     edits = normalize_edits(edits)
 
@@ -169,11 +205,18 @@ def resolve_spec(proposal: Any, edits: Mapping[str, Any] | None) -> TaskSpec:
     if not all(_EVIDENCE_ID.fullmatch(e) for e in evidence):
         # Evidence is ids only. Free text here could smuggle a held item's content outward.
         raise InvalidProposal("evidence")
-    rationale = strip_dashes(str(pick("rationale") or "").replace("\r\n", "\n").replace("\r", "\n")).strip()
-    return TaskSpec(
+    rationale = neutralize_markdown(
+        strip_dashes(str(pick("rationale") or "").replace("\r\n", "\n").replace("\r", "\n"))).strip()
+    spec = TaskSpec(
         id=pid, title=title, project=_one_line(pick("project") or "", 100),
         rationale=rationale[:RATIONALE_CHARS], evidence=evidence, due=_parse_due(due_raw),
     )
+    if cfg is not None:
+        try:
+            assert_clean("\n".join((spec.title, spec.project, spec.rationale, *spec.evidence)), cfg)
+        except TierViolation:
+            raise InvalidProposal("sensitive") from None
+    return spec
 
 
 def _due_text(due: date | datetime | None) -> str:
@@ -255,7 +298,7 @@ class MarkdownTracker:
 
     def create_task(self, proposal: Any, edits: Mapping[str, Any] | None) -> TrackerResult:
         try:
-            spec = resolve_spec(proposal, edits)
+            spec = resolve_spec(proposal, edits, self._cfg)
         except InvalidProposal as exc:
             return _finish(self._audit, self.name, str(_field(proposal, "id") or ""),
                            TrackerResult(ok=False, error=f"invalid_proposal:{exc}"))
@@ -264,8 +307,9 @@ class MarkdownTracker:
         except VaultWriteDenied as exc:
             return _finish(self._audit, self.name, spec.id, TrackerResult(ok=False, error=f"vault:{exc.reason}"))
         except OSError as exc:
+            # A write that died half way may still have left the block behind, so a plain retry could double it.
             return _finish(self._audit, self.name, spec.id,
-                           TrackerResult(ok=False, error=f"vault:{type(exc).__name__}"))
+                           TrackerResult(ok=False, error=f"vault:{type(exc).__name__}", unknown=True))
         return _finish(self._audit, self.name, spec.id,
                        TrackerResult(ok=True, url=Path(written.path).as_uri(), external_id=f"md-{spec.id}"))
 
@@ -274,7 +318,7 @@ def _finish(audit: AuditLog, adapter: str, proposal_id: str, result: TrackerResu
             **extra: Any) -> TrackerResult:
     """Audit the outcome and hand it back. The error string is already scrubbed by the caller."""
     audit.emit("tracker_result", adapter=adapter, proposal_id=proposal_id, ok=result.ok,
-               external_id=result.external_id, error=result.error, **extra)
+               external_id=result.external_id, error=result.error, outcome_unknown=result.unknown, **extra)
     return result
 
 
@@ -317,7 +361,8 @@ class ClickUpTracker:
     def problems(self) -> list[str]:
         found = []
         c = self._cfg.tracker.clickup
-        if not self._token():
+        # A dry run sends nothing, so it needs no token: that is the point of running one.
+        if not c.dry_run and not self._token():
             found.append(f"no ClickUp token in the environment variable {self._cfg.tracker.clickup_token_env}")
         if not c.lists and not c.default_list_id:
             found.append("no list configured: set [tracker.clickup].default_list_id or [tracker.clickup.lists]")
@@ -367,7 +412,7 @@ class ClickUpTracker:
         edits = normalize_edits(edits)
         pid = str(_field(proposal, "id") or "")
         try:
-            spec = resolve_spec(proposal, edits)
+            spec = resolve_spec(proposal, edits, self._cfg)
             list_id = self._list_id(spec, edits)
         except InvalidProposal as exc:
             code = str(exc) if str(exc) in ("bad_list_id", "no_list") else f"invalid_proposal:{exc}"
@@ -376,9 +421,10 @@ class ClickUpTracker:
         url = f"{c.api_base}/list/{list_id}/task"
         data = json.dumps(self._body(spec, edits), ensure_ascii=False).encode("utf-8")
         if c.dry_run:
+            # Ids, sizes and a hash only: the audit chain is kept for 180 days and must never hold the text.
             self._audit.emit("tracker_dry_run", adapter=self.name, proposal_id=spec.id, method="POST", url=url,
-                             authorization="<redacted>", request_json=data.decode("utf-8"))
-            return TrackerResult(ok=True, dry_run=True)
+                             authorization="<redacted>", bytes=len(data), sha256=sha256_hex(data))
+            return TrackerResult(ok=True, dry_run=True, request=data.decode("utf-8"))
         token = self._token()
         if not token:
             return _finish(self._audit, self.name, spec.id, TrackerResult(ok=False, error="token_absent"))
@@ -407,32 +453,36 @@ class ClickUpTracker:
             finally:
                 exc.close()
             error = f"http_{status}" + (f": {self._scrub(excerpt, token)}" if excerpt.strip() else "")
-            return _finish(self._audit, self.name, proposal_id, TrackerResult(ok=False, error=error),
-                           http_status=status)
+            # A 4xx says the server refused the request; a 5xx may come after the task was written.
+            return _finish(self._audit, self.name, proposal_id,
+                           TrackerResult(ok=False, error=error, unknown=status >= 500), http_status=status)
         except TimeoutError:
-            return _finish(self._audit, self.name, proposal_id, TrackerResult(ok=False, error="timeout"))
+            return _finish(self._audit, self.name, proposal_id, TrackerResult(ok=False, error="timeout", unknown=True))
         except urllib.error.URLError as exc:
+            if isinstance(exc.reason, ConnectionRefusedError):  # nothing listened: the request never arrived
+                return _finish(self._audit, self.name, proposal_id, TrackerResult(ok=False, error="network"))
             code = "timeout" if isinstance(exc.reason, TimeoutError) else "network"
-            return _finish(self._audit, self.name, proposal_id, TrackerResult(ok=False, error=code))
+            return _finish(self._audit, self.name, proposal_id, TrackerResult(ok=False, error=code, unknown=True))
         except OSError:
-            return _finish(self._audit, self.name, proposal_id, TrackerResult(ok=False, error="network"))
+            return _finish(self._audit, self.name, proposal_id, TrackerResult(ok=False, error="network", unknown=True))
         except Exception as exc:  # noqa: BLE001  a click must end in a message, never a traceback
             return _finish(self._audit, self.name, proposal_id,
-                           TrackerResult(ok=False, error=f"error:{type(exc).__name__}"))
+                           TrackerResult(ok=False, error=f"error:{type(exc).__name__}", unknown=True))
         return self._parse(proposal_id, status, raw)
 
     def _parse(self, proposal_id: str, status: int | None, raw: bytes) -> TrackerResult:
         if status is None or not 200 <= status < 300:
             return _finish(self._audit, self.name, proposal_id,
-                           TrackerResult(ok=False, error=f"http_{status}"), http_status=status)
+                           TrackerResult(ok=False, error=f"http_{status}", unknown=True), http_status=status)
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (ValueError, UnicodeDecodeError):
             payload = None
         task_id = payload.get("id") if isinstance(payload, dict) else None
         if not isinstance(task_id, str) or not _EXTERNAL_ID.fullmatch(task_id):
+            # A 2xx whose body is not a task: the server accepted the request, so the task may well exist.
             return _finish(self._audit, self.name, proposal_id,
-                           TrackerResult(ok=False, error="bad_response"), http_status=status)
+                           TrackerResult(ok=False, error="bad_response", unknown=True), http_status=status)
         link = payload.get("url")
         if not (isinstance(link, str) and link.startswith("https://") and link.isprintable()):
             link = f"https://app.clickup.com/t/{task_id}"

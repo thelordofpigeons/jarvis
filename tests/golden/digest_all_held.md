@@ -1,7 +1,7 @@
 ---
 type: jarvis-digest
 generator: jarvisd
-generator_version: 1.1.0
+generator_version: 1.2.0
 job_id: digest-2026-10-06
 date: 2026-10-06
 generated_at: 2026-10-06T06:31:40+01:00

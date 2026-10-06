@@ -436,6 +436,12 @@ class HubData:
                         break
                     dirty_since = day["date"]
             known = facts is not None
+            # No activity anywhere in the digests on file: the repo has been idle at least as long as the history
+            # reaches back, so that span is a floor, and it can still trip the badge. Without this the longest
+            # idle repos (older than the history) would be the only ones that never get flagged.
+            idle_floor = known and active is None and bool(history)
+            if idle_floor:
+                active = history[0]["date"]
             days_since = (today - active).days if (known and active is not None) else None
             dirty_days = (today - dirty_since).days if dirty_since is not None else None
             stale = days_since is not None and days_since >= self.cfg.hub.stale_days
@@ -444,7 +450,8 @@ class HubData:
             task_line = task if (task and any(k in task.lower() for k in keywords)) else ""
             risks: list[str] = []
             if stale:
-                risks.append(f"stale repo, no activity for {days_since} days")
+                risks.append(f"stale repo, no activity in the {days_since} days of digests on file" if idle_floor
+                             else f"stale repo, no activity for {days_since} days")
             if dirty_days is not None and dirty_days >= DIRTY_RISK_DAYS:
                 risks.append(f"uncommitted work for {dirty_days} days")
             if gh.get("ci") in _FAILING_CI_TOKENS:
@@ -458,7 +465,7 @@ class HubData:
                 "modified": facts["modified"] if facts else 0,
                 "untracked": facts["untracked"] if facts else 0,
                 "prs": gh.get("prs"), "ci": gh.get("ci", ""),
-                "days_since": days_since, "dirty_days": dirty_days, "stale": stale,
+                "days_since": days_since, "idle_floor": idle_floor, "dirty_days": dirty_days, "stale": stale,
                 "task": task_line, "risks": risks,
                 "open_proposals": sum(1 for p in proposals if p["project"] == name and p["status"] == "proposed"),
             })
@@ -482,7 +489,8 @@ class HubData:
 
     def ledger(self) -> dict[str, Any]:
         """Everything delivered, newest first, plus a rollup per month. Delivered means a confirmed proposal with a
-        tracker link, a digest run that wrote a note, or a consolidation run that wrote its candidates note."""
+        tracker link, a digest run that wrote a note, a consolidation run that wrote its candidates note, or a
+        proposals run that wrote its proposals (its paid call is real spend, so the monthly sum includes it)."""
         entries: list[dict[str, Any]] = []
         for p in self.proposals():
             if p["status"] in ("confirmed", "edited_confirmed") and p["tracker_ref"]:
@@ -498,6 +506,11 @@ class HubData:
                 entries.append({"kind": "digest", "stamp": stamp, "ref": job_id, "title": "Morning digest",
                                 "project": "", "cost": m.cost_usd, "links": [],
                                 "evidence": [f"/digest/{job_id}"] if job_id in notes else []})
+            elif job_id.startswith("propose-") and m.status == "written":
+                made = int(m.counts.get("proposals", 0))
+                entries.append({"kind": "proposal_run", "stamp": stamp, "ref": job_id,
+                                "title": f"Proposals run, {made} new", "project": "", "cost": m.cost_usd, "links": [],
+                                "evidence": []})
             elif job_id.startswith("consolidate-") and m.status == "written":
                 note = m.paths.get("note", "")
                 entries.append({"kind": "consolidation", "stamp": stamp, "ref": job_id, "title": "Consolidation note",
@@ -514,10 +527,11 @@ class HubData:
         months: dict[str, dict[str, Any]] = {}
         for e in entries:
             row = months.setdefault(str(e["stamp"])[:7], {"count": 0, "cost": 0.0, "proposals": 0, "digests": 0,
-                                                          "notes": 0})
+                                                          "notes": 0, "runs": 0})
             row["count"] += 1
             row["cost"] = round(row["cost"] + (e["cost"] or 0.0), 6)
-            row[{"proposal": "proposals", "digest": "digests", "consolidation": "notes"}[e["kind"]]] += 1
+            row[{"proposal": "proposals", "digest": "digests", "consolidation": "notes",
+                 "proposal_run": "runs"}[e["kind"]]] += 1
         rollup = [{"month": k, **v} for k, v in sorted(months.items(), reverse=True)]
         return {"entries": entries, "rollup": rollup}
 

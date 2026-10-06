@@ -222,3 +222,80 @@ def test_views_never_write_and_refuse_post(delivered: Config, clock: FakeClock, 
         assert client.get(path).status_code == 200
         assert client.post(path).status_code == 405
     assert snap() == before
+
+
+# --- release 1.2.0: idle repos with no recorded activity, and the proposals run's spend ----------------------------------
+
+
+def _quiet_history(cfg: Config, *days: str) -> None:
+    for day in days:
+        _digest(cfg, day, ["- Quiet: alpha-repo, beta-repo."])
+
+
+def test_a_repo_with_no_activity_in_the_digest_history_goes_stale_by_the_length_of_that_history(
+        cfg: Config, clock: FakeClock) -> None:
+    _quiet_history(cfg, "2026-09-01", "2026-10-05")
+    alpha = _rows(cfg, clock)["alpha-repo"]
+    assert alpha["known"] is True and alpha["stale"] is True
+    assert alpha["days_since"] == 35 and alpha["idle_floor"] is True
+    assert any("stale" in r and "35" in r for r in alpha["risks"])
+    cfg.hub.stale_days = 36
+    assert _rows(cfg, clock)["alpha-repo"]["stale"] is False
+    cfg.hub.stale_days = 35
+    assert _rows(cfg, clock)["alpha-repo"]["stale"] is True
+    body = _client(cfg, clock).get("/projects").text
+    assert "35+" in body and "stale" in body.lower()
+
+
+def test_a_short_history_cannot_make_a_repo_stale(cfg: Config, clock: FakeClock) -> None:
+    _quiet_history(cfg, "2026-10-03", "2026-10-05")
+    alpha = _rows(cfg, clock)["alpha-repo"]
+    assert alpha["stale"] is False and alpha["days_since"] == 3 and alpha["idle_floor"] is True
+    assert not any("stale" in r for r in alpha["risks"])
+
+
+def test_a_repo_with_a_commit_is_not_a_floor(history: Config, clock: FakeClock) -> None:
+    alpha = _rows(history, clock)["alpha-repo"]
+    assert alpha["idle_floor"] is False and alpha["days_since"] == 26
+
+
+def test_the_proposals_runs_spend_is_in_the_ledger_and_the_monthly_sum(delivered: Config, clock: FakeClock) -> None:
+    run = delivered.daemon.state_dir / "runs" / "propose-2026-10-06"
+    run.mkdir(parents=True)
+    data = {"job_id": "propose-2026-10-06", "status": "written", "started_at": "2026-10-06T05:40:00+00:00",
+            "finished_at": "2026-10-06T05:41:00+00:00", "cost_usd": 0.2, "counts": {"proposals": 2}, "paths": {}}
+    (run / "run.json").write_text(json.dumps(data), encoding="utf-8", newline="\n")
+    skipped = delivered.daemon.state_dir / "runs" / "propose-2026-10-05"
+    skipped.mkdir(parents=True)
+    (skipped / "run.json").write_text(json.dumps({**data, "job_id": "propose-2026-10-05", "status": "no_items",
+                                                  "cost_usd": 0.0}), encoding="utf-8", newline="\n")
+    led = HubData(delivered, clock).ledger()
+    runs = [e for e in led["entries"] if e["kind"] == "proposal_run"]
+    assert [e["ref"] for e in runs] == ["propose-2026-10-06"] and runs[0]["cost"] == pytest.approx(0.2)
+    assert "2" in runs[0]["title"]
+    roll = {r["month"]: r for r in led["rollup"]}
+    assert roll["2026-10"]["cost"] == pytest.approx(0.24) and roll["2026-10"]["runs"] == 1 and roll["2026-10"]["count"] == 4
+    body = _client(delivered, clock).get("/ledger").text
+    assert "Proposals run" in body and "0.2000" in body
+
+
+def test_the_example_local_file_maps_tasks_to_a_repo_it_defines(tmp_path: Path) -> None:
+    from jarvisd import ROOT
+    from jarvisd.config import load_config
+
+    local = tmp_path / "jarvis.local.toml"
+    local.write_text((ROOT / "jarvis.local.toml.example").read_text(encoding="utf-8"), encoding="utf-8", newline="\n")
+    cfg = load_config(ROOT / "jarvis.toml", local_path=local)
+    names = {r.name for r in cfg.digest.repos}
+    assert cfg.hub.task_projects and set(cfg.hub.task_projects) <= names
+
+
+def test_the_tracked_config_leaves_stale_days_to_its_default() -> None:
+    # A key the previous release does not know makes a daemon that is still running that release reject the whole
+    # file on its next tick and stop running jobs. Keep the default in code, not in the tracked file.
+    import tomllib
+    from jarvisd import ROOT
+    from jarvisd.config import HubCfg
+
+    raw = tomllib.loads((ROOT / "jarvis.toml").read_text(encoding="utf-8"))
+    assert "stale_days" not in raw["hub"] and HubCfg().stale_days == 14

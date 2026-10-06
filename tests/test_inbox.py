@@ -82,7 +82,7 @@ def make_proposal(n: int = 1, **over: Any) -> Proposal:
     base: dict[str, Any] = dict(
         id=f"p-{n:08x}", created_at=f"2026-10-01T08:{n % 60:02d}:00+00:00", run_id="digest-2026-10-01",
         title=f"Synthetic proposal {n:02d}", project="example-api", kind="task",
-        evidence=[CLEARED_ID, HELD_ID, UNKNOWN_ID], suggested_status="to do", due_hint=date(2026, 10, 9),
+        evidence=[CLEARED_ID, UNKNOWN_ID], suggested_status="to do", due_hint=date(2026, 10, 9),
         rationale="Synthetic reason for the example.")
     base.update(over)
     return Proposal(**base)
@@ -156,7 +156,7 @@ def tree(root: Path) -> dict[str, bytes]:
 
 
 def test_inbox_lists_open_proposals_with_resolved_and_held_evidence(cfg: Config, clock: FakeClock) -> None:
-    p = put(cfg)
+    p = put(cfg, evidence=[CLEARED_ID, HELD_ID, UNKNOWN_ID])
     put(cfg, 2, status="rejected", rejected_reason="not mine", title="Already decided proposal")
     put(cfg, 3, status="confirmed", tracker_ref="https://tracker.example.test/t/1", title="Confirmed earlier")
     client = client_for(cfg, clock)
@@ -364,6 +364,42 @@ def test_an_absent_origin_is_accepted_and_the_right_one_too(cfg: Config, clock: 
     client = client_for(cfg, clock, FakeTracker())
     assert post(client, "/inbox/p-00000001/confirm", origin=None).status_code == 303
     assert post(client, "/inbox/p-00000002/confirm", origin=HOST).status_code == 303
+
+
+def test_origin_may_be_any_host_the_host_guard_admits_and_only_that(cfg: Config, clock: FakeClock) -> None:
+    put(cfg, 1)
+    put(cfg, 2)
+    put(cfg, 3)
+    cfg.hub.allowed_hosts = ["box.tailnet.example"]
+    app = hub_app.create_app(cfg, clock=clock, tracker=FakeTracker())
+    # localhost is an allowed Host: the browser sends Origin http://localhost:8765
+    local = TestClient(app, base_url="http://localhost:8765")
+    assert post(local, "/inbox/p-00000001/confirm", origin="http://localhost:8765").status_code == 303
+    # `tailscale serve`: Host and Origin both carry the tailnet name, over https
+    phone = TestClient(app, base_url="https://box.tailnet.example")
+    assert post(phone, "/inbox/p-00000002/confirm", origin="https://box.tailnet.example").status_code == 303
+    # an Origin that is not the Host the request arrived on is still a cross-site post
+    assert post(phone, "/inbox/p-00000003/confirm", origin="https://evil.example").status_code == 403
+    assert post(phone, "/inbox/p-00000003/confirm", origin="http://127.0.0.1:8765").status_code == 403
+    assert post(local, "/inbox/p-00000003/confirm", origin="http://localhost:9999").status_code == 403
+    assert stored(cfg, make_proposal(3)).status == "proposed"
+
+
+def test_a_refused_origin_does_not_tell_a_phone_to_use_loopback(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    resp = post(client_for(cfg, clock, FakeTracker()), f"/inbox/{p.id}/confirm", origin="http://evil.example")
+    assert resp.status_code == 403 and "127.0.0.1" not in resp.text and "address you used" in resp.text
+
+
+def test_too_many_form_fields_is_a_400_not_a_traceback(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    fake = FakeTracker()
+    client = client_for(cfg, clock, fake)
+    body = {f"f{n}": "x" for n in range(30)}
+    for action in ("confirm", "edit", "reject"):
+        resp = client.post(f"/inbox/{p.id}/{action}", data=body, headers={"Origin": HOST})  # no token: refused before it
+        assert resp.status_code == 400 and "Traceback" not in resp.text
+    assert fake.calls == [] and stored(cfg, p).status == "proposed"
 
 
 def test_origin_follows_the_port_the_hub_listens_on(cfg: Config, clock: FakeClock) -> None:
@@ -643,3 +679,197 @@ def test_no_dashes_in_the_new_source_files() -> None:
         body = text.replace("EM, EN = chr(0x2014), chr(0x2013)", "")
         assert chr(0x2014) not in body and chr(0x2013) not in body, rel
         assert "\r" not in text and not text.startswith("﻿"), rel
+
+
+# --- release 1.2.0: a create whose outcome is unknown must not be offered again -------------------------------------
+
+
+def attempt_file(cfg: Config, p: Proposal) -> Path:
+    return folder(cfg) / f"{p.id}.attempt"
+
+
+class SpyTracker(FakeTracker):
+    """Remembers whether the attempt marker already existed at the moment of the outward call."""
+
+    def __init__(self, cfg: Config, p: Proposal, **kw: Any) -> None:
+        super().__init__(**kw)
+        self.marker_seen: list[bool] = []
+        self._path = attempt_file(cfg, p)
+
+    def create_task(self, proposal: Any, edits: Any) -> TrackerResult:
+        self.marker_seen.append(self._path.exists())
+        return super().create_task(proposal, edits)
+
+
+UNKNOWN = TrackerResult(ok=False, error="timeout", unknown=True)
+
+
+def test_the_attempt_is_written_before_the_outward_call_and_removed_on_success(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    spy = SpyTracker(cfg, p)
+    assert post(client_for(cfg, clock, spy), f"/inbox/{p.id}/confirm").status_code == 303
+    assert spy.marker_seen == [True] and not attempt_file(cfg, p).exists()
+    assert not list(folder(cfg).glob("*.tmp")) and not list(folder(cfg).glob("*.attempt"))
+
+
+def test_a_definite_failure_leaves_no_marker_and_stays_confirmable(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    fake = FakeTracker(TrackerResult(ok=False, error="http_401"))
+    client = client_for(cfg, clock, fake)
+    assert post(client, f"/inbox/{p.id}/confirm").status_code == 502
+    assert not attempt_file(cfg, p).exists()
+    fake.result = TrackerResult(ok=True, url="https://tracker.example.test/t/1", external_id="1")
+    assert post(client, f"/inbox/{p.id}/confirm").status_code == 303 and len(fake.calls) == 2
+
+
+@pytest.mark.parametrize("how", ["unknown", "raises"])
+def test_an_ambiguous_outcome_marks_the_proposal_and_a_second_confirm_is_refused(cfg: Config, clock: FakeClock, how: str) -> None:
+    p = put(cfg)
+    fake = FakeTracker(UNKNOWN) if how == "unknown" else FakeTracker(boom=RuntimeError("kaput"))
+    client = client_for(cfg, clock, fake)
+    first = post(client, f"/inbox/{p.id}/confirm")
+    assert first.status_code == 502 and "may already exist" in first.text and "still open" not in first.text
+    assert attempt_file(cfg, p).exists() and stored(cfg, p).status == "proposed"
+    failed = events(cfg, "proposal_confirm_failed")
+    assert failed[0]["outcome_unknown"] is True
+    second = post(client, f"/inbox/{p.id}/confirm")
+    assert second.status_code == 409 and "outcome is unknown" in second.text
+    third = post(client, f"/inbox/{p.id}/edit", {"title": "Other", "project": "", "due": ""})
+    assert third.status_code == 409 and len(fake.calls) == 1, "no second request went out"
+    assert stored(cfg, p).status == "proposed"
+
+
+def test_the_card_of_a_maybe_created_proposal_asks_for_an_explicit_override(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    q = put(cfg, 2)
+    client = client_for(cfg, clock, FakeTracker(UNKNOWN))
+    post(client, f"/inbox/{p.id}/confirm")
+    page = client.get("/inbox").text
+    cards = dict(re.findall(r'<section class="card proposal" id="([^"]+)">(.*?)</section>', page, re.S))
+    assert "outcome is unknown" in cards[p.id] and "Confirm anyway" in cards[p.id]
+    assert 'name="override" value="1"' in cards[p.id]
+    assert 'name="override"' not in cards[q.id] and "Confirm anyway" not in cards[q.id]
+
+
+def test_an_explicit_override_creates_the_task_and_clears_the_marker(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    fake = FakeTracker(UNKNOWN)
+    client = client_for(cfg, clock, fake)
+    post(client, f"/inbox/{p.id}/confirm")
+    fake.result = TrackerResult(ok=True, url="https://tracker.example.test/t/9", external_id="9")
+    assert post(client, f"/inbox/{p.id}/confirm", {"override": "1"}).status_code == 303
+    assert len(fake.calls) == 2 and not attempt_file(cfg, p).exists()
+    assert stored(cfg, p).status == "confirmed"
+    audited = events(cfg, "proposal_confirm_override")
+    assert len(audited) == 1 and audited[0]["proposal_id"] == p.id
+
+
+def test_a_marker_written_by_a_crash_between_the_call_and_the_save_blocks_a_blind_retry(
+        cfg: Config, clock: FakeClock, monkeypatch: pytest.MonkeyPatch) -> None:
+    p = put(cfg)
+    fake = FakeTracker()
+
+    def dies(*args: Any, **kwargs: Any) -> Path:
+        raise OSError("power loss")
+
+    monkeypatch.setattr(inbox, "save_proposal", dies)
+    assert post(client_for(cfg, clock, fake), f"/inbox/{p.id}/confirm").status_code == 500
+    monkeypatch.undo()
+    assert attempt_file(cfg, p).exists()
+    again = post(client_for(cfg, clock, fake), f"/inbox/{p.id}/confirm")  # a new process: nothing in memory
+    assert again.status_code == 409 and len(fake.calls) == 1
+
+
+def test_the_cli_refuses_a_blind_retry_and_accepts_confirm_anyway(cfg: Config, clock: FakeClock,
+                                                                  capsys: pytest.CaptureFixture[str]) -> None:
+    p = put(cfg)
+    from jarvisd.propose import write_attempt
+
+    write_attempt(folder(cfg), p.id, tracker="fake", error="timeout", ts="2026-10-01T09:00:00+00:00")
+    assert cli.main(["proposals", "confirm", p.id], cfg=cfg, clock=clock) == 1
+    assert "outcome is unknown" in capsys.readouterr().out and stored(cfg, p).status == "proposed"
+    assert cli.main(["proposals", "confirm", p.id, "--confirm-anyway"], cfg=cfg, clock=clock) == 0
+    assert stored(cfg, p).status == "confirmed" and not attempt_file(cfg, p).exists()
+
+
+def test_reject_still_works_on_a_maybe_created_proposal(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    client = client_for(cfg, clock, FakeTracker(UNKNOWN))
+    post(client, f"/inbox/{p.id}/confirm")
+    assert post(client, f"/inbox/{p.id}/reject", {"reason": "I created it by hand"}).status_code == 303
+    assert stored(cfg, p).status == "rejected"
+
+
+# --- release 1.2.0: the gate runs again at confirm time --------------------------------------------------------------
+
+
+def test_a_term_added_after_the_proposal_was_made_stops_the_confirm(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg, title="Ship the zebra-codename release", rationale="About zebra-codename.")
+    cfg.gates.sensitive_terms = ["zebra-codename"]
+    fake = FakeTracker()
+    resp = post(client_for(cfg, clock, fake), f"/inbox/{p.id}/confirm")
+    assert resp.status_code == 422 and "sensitive term" in resp.text and "Reject" in resp.text
+    assert "zebra" not in resp.text.split('<section class="card proposal"')[0], "the banner never echoes the term"
+    assert fake.calls == [] and stored(cfg, p).status == "proposed" and not attempt_file(cfg, p).exists()
+    failed = events(cfg, "proposal_confirm_failed")
+    assert failed[0]["error"] == "flagged:sensitive" and "zebra" not in json.dumps(events(cfg))
+
+
+def test_a_term_typed_into_the_edit_fields_stops_the_confirm(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    cfg.gates.sensitive_terms = ["zebra-codename"]
+    fake = FakeTracker()
+    client = client_for(cfg, clock, fake)
+    assert post(client, f"/inbox/{p.id}/edit", {"title": "About ZEBRA-CODENAME", "project": "", "due": ""}).status_code == 422
+    assert post(client, f"/inbox/{p.id}/edit", {"title": "", "project": "zebra-codename", "due": ""}).status_code == 422
+    assert fake.calls == [] and stored(cfg, p).status == "proposed"
+    assert post(client, f"/inbox/{p.id}/edit", {"title": "A harmless rename", "project": "", "due": ""}).status_code == 303
+
+
+def test_a_proposal_whose_evidence_is_now_held_cannot_be_confirmed(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg, evidence=[CLEARED_ID, HELD_ID])
+    fake = FakeTracker()
+    resp = post(client_for(cfg, clock, fake), f"/inbox/{p.id}/confirm")
+    assert resp.status_code == 422 and "held" in resp.text and HELD_ID in resp.text and HELD_SECRET not in resp.text
+    assert fake.calls == [] and stored(cfg, p).status == "proposed" and not attempt_file(cfg, p).exists()
+    assert events(cfg, "proposal_confirm_failed")[0]["error"] == "held_evidence"
+
+
+def test_a_held_evidence_id_that_cannot_name_a_file_is_not_an_error(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg, evidence=["brain:note/with:odd*chars", CLEARED_ID])
+    assert post(client_for(cfg, clock, FakeTracker()), f"/inbox/{p.id}/confirm").status_code == 303
+
+
+def test_a_dry_run_shows_the_owner_the_request_but_audits_none_of_it(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    request = json.dumps({"name": "Synthetic request body", "description": "why"})
+    resp = post(client_for(cfg, clock, FakeTracker(TrackerResult(ok=True, dry_run=True, request=request))),
+                f"/inbox/{p.id}/confirm")
+    assert resp.status_code == 502 and "Synthetic request body" in resp.text
+    assert not attempt_file(cfg, p).exists()
+    assert "Synthetic request body" not in json.dumps(events(cfg))
+
+
+def test_a_dry_run_confirm_needs_no_token_with_the_real_clickup_adapter(cfg: Config, clock: FakeClock) -> None:
+    c = cfg.model_copy(deep=True)
+    c.tracker.adapter = "clickup"
+    c.tracker.clickup.dry_run = True
+    c.tracker.clickup.default_list_id = "901999"
+    p = put(c)
+    resp = post(client_for(c, clock), f"/inbox/{p.id}/confirm")  # the real adapter, no token in the environment
+    assert resp.status_code == 502 and "dry_run" in resp.text and "no ClickUp token" not in resp.text
+    assert "Synthetic proposal 01" in resp.text and stored(c, p).status == "proposed"
+
+
+def test_decision_audit_records_keep_the_envelope_run_id(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    post(client_for(cfg, clock, FakeTracker()), f"/inbox/{p.id}/confirm")
+    done = events(cfg, "proposal_confirmed")[0]
+    assert done["digest_run_id"] == "digest-2026-10-01" and done["run_id"] != "digest-2026-10-01"
+    q = put(cfg, 2)
+    post(client_for(cfg, clock, FakeTracker(TrackerResult(ok=False, error="http_401"))), f"/inbox/{q.id}/confirm")
+    bad = events(cfg, "proposal_confirm_failed")[0]
+    assert bad["digest_run_id"] == "digest-2026-10-01" and bad["run_id"] != "digest-2026-10-01"
+    r = put(cfg, 3)
+    post(client_for(cfg, clock), f"/inbox/{r.id}/reject", {"reason": "no"})
+    assert events(cfg, "proposal_rejected")[0]["digest_run_id"] == "digest-2026-10-01"

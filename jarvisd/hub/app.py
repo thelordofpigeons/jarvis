@@ -7,8 +7,10 @@ Boundaries, all enforced here and tested:
   web page on another origin from reading the hub through DNS rebinding.
 - Everything is GET except POST /inbox/{id}/confirm, /edit and /reject; any other method gets 405 from the
   router. Those three read a small urlencoded body, and only after three checks: the Host guard above, an
-  Origin that is absent or exactly http://127.0.0.1:<port>, and the per-process CSRF token (secrets.token_urlsafe,
-  made when the app is built, sent in a hidden field, compared in constant time). A GET never changes anything.
+  Origin that is absent or names the very host (and port) the request arrived on, and the per-process CSRF token
+  (secrets.token_urlsafe, made when the app is built, sent in a hidden field, compared in constant time). The Host
+  header was already checked against the allowlist, so "Origin equals Host" lets http://localhost:<port> and a
+  `tailscale serve` name decide, and still refuses any other site. A GET never changes anything.
 - No CDN: the interactive API docs are switched off, CSS and JS are served from /static/.
 - The hub never calls Claude. Its data layer (jarvisd/hub/data.py) only reads; the only writes are the Inbox
   decisions, made by jarvisd/inbox.py, the same functions `jarvis proposals confirm|reject` uses.
@@ -24,7 +26,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
@@ -51,7 +53,9 @@ SECURITY_HEADERS = {
 MAX_FORM_BYTES = 16_384
 # Outcome code of a refused decision to the HTTP status of the page that says why.
 DECISION_STATUS = {"not_found": 404, "decided": 409, "busy": 409, "invalid": 422, "not_ready": 502,
-                   "tracker_failed": 502, "save_failed": 500}
+                   "flagged": 422, "held": 422, "tracker_failed": 502, "maybe_created": 502, "unresolved": 409,
+                   "save_failed": 500}
+MAX_FORM_FIELDS = 20
 
 
 def host_name(header: str) -> str:
@@ -63,14 +67,35 @@ def host_name(header: str) -> str:
     return text.rsplit(":", 1)[0] if ":" in text else text
 
 
+def origin_allowed(origin: str | None, host_header: str) -> bool:
+    """True for no Origin, or an http(s) origin with no path whose host and port are the Host header's.
+
+    The Host header has passed the allowlist before this runs. A page on another site sends its own
+    origin, which is not the Host the request reached; "null" and anything with a path never match.
+    https is only taken for a non-loopback name: nothing serves TLS on the loopback port itself.
+    """
+    if origin is None:
+        return True
+    try:
+        parts = urlsplit(origin)
+        parts.port  # noqa: B018  raises ValueError on a port that is not a number
+    except ValueError:
+        return False
+    host = host_header.strip().lower()
+    if parts.scheme not in ("http", "https") or not parts.hostname or parts.path or parts.query or parts.fragment:
+        return False
+    if parts.username is not None or parts.password is not None or parts.netloc.lower() != host:
+        return False
+    return not (parts.scheme == "https" and host_name(host) in LOOPBACK_NAMES)
+
+
 def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port: int | None = None,
                tracker: Any = None) -> FastAPI:
-    """`port` is the one the server listens on (the Origin check needs it); `tracker` replaces the configured
-    adapter, which tests use and nothing else does."""
+    """`port` is the one the server listens on (kept for the callers; the Origin check reads the Host header,
+    which carries it); `tracker` replaces the configured adapter, which tests use and nothing else does."""
     data = HubData(cfg, clock)
     allowed = LOOPBACK_NAMES | {h.lower() for h in cfg.hub.allowed_hosts}
     refresh = cfg.hub.refresh_s
-    origin_ok = f"http://{LOOPBACK_HOST}:{cfg.hub.port if port is None else port}"
     csrf_token = secrets.token_urlsafe(32)  # per process: a page served by an earlier process cannot post to this one
     app = FastAPI(title="JARVIS hub", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -119,8 +144,9 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port
 
     async def form_fields(request: Request) -> dict[str, str] | Response:
         """The urlencoded body as a dict, or the refusal to send back."""
-        if request.headers.get("origin") not in (None, origin_ok):
-            return PlainTextResponse(f"Origin not allowed. Open the hub at {origin_ok}/inbox.\n", status_code=403)
+        if not origin_allowed(request.headers.get("origin"), request.headers.get("host", "")):
+            return PlainTextResponse("Origin not allowed. Reload the Inbox from the address you used to open it "
+                                     "and try again.\n", status_code=403)
         ctype = request.headers.get("content-type", "").lower()
         if ctype and not ctype.startswith("application/x-www-form-urlencoded"):
             return PlainTextResponse("Expected a form post.\n", status_code=415)
@@ -135,7 +161,10 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port
             raw += chunk
             if len(raw) > MAX_FORM_BYTES:
                 return PlainTextResponse("Form too large.\n", status_code=413)
-        parsed = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True, max_num_fields=20)
+        try:
+            parsed = parse_qs(raw.decode("utf-8", "replace"), keep_blank_values=True, max_num_fields=MAX_FORM_FIELDS)
+        except ValueError:  # more fields than the forms have: refuse before the token check, without a traceback
+            return PlainTextResponse("Malformed form.\n", status_code=400)
         fields = {k: v[0] for k, v in parsed.items() if v}
         if not hmac.compare_digest(fields.get("csrf", "").encode("utf-8"), csrf_token.encode("utf-8")):
             return PlainTextResponse("Missing or wrong CSRF token. Reload the Inbox and try again.\n", status_code=403)
@@ -152,6 +181,7 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port
             edit = action == "edit"
             result = await run_in_threadpool(
                 lambda: inbox.confirm(cfg, audit, tracker, proposal_id, clock=clock,
+                                      override=fields.get("override") == "1",
                                       title=fields.get("title") if edit else None,
                                       project=fields.get("project") if edit else None,
                                       due=fields.get("due") if edit else None))

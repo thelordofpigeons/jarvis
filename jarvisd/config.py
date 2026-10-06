@@ -429,7 +429,7 @@ class HubCfg(_Forbid):
     # Seconds between automatic refreshes of an open page; 0 turns the refresh script off.
     refresh_s: int = Field(default=30, ge=0, le=3600)
     audit_rows: int = Field(default=50, ge=1, le=500)
-    # Projects view: a repo whose HEAD reflog has not moved (commit, checkout, pull) for more than this many days gets the stale badge.
+    # Projects view: a repo with no commit or uncommitted change in the digest notes for this many days or more gets the stale badge.
     stale_days: int = Field(default=14, ge=1, le=365)
     # Projects view: repo name -> keywords. The active task line is shown under a repo when it contains one
     # of them (case-insensitive). Real project names live in jarvis.local.toml, never in the tracked file.

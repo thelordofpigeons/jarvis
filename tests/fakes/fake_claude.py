@@ -25,7 +25,7 @@ Environment (set by the test runner, which is why they are not in the client's a
                          evidence id was never sent) | mixed (one proposal citing a sent id and an
                          unsent one) | dupes (same title twice, different spelling) | invalid_json |
                          not_a_list (an object) | held_guess (cites the id t-term) | one_bad (1 good, 1 with an unknown key) | echo_rejected
-                         (cites a rejected-example id as evidence) | canary (title carries the term
+                         (cites a rejected-example id as evidence) | echo_open (cites an open- row as evidence) | canary (title carries the term
                          in FAKE_CLAUDE_TERM)
 """
 from __future__ import annotations
@@ -124,7 +124,7 @@ def _proposal(title: str, evidence: list[str], **over: object) -> dict:
 
 def _proposals_result(stdin_text: str) -> object:
     all_ids = _ids(stdin_text)
-    ids = [i for i in all_ids if not i.startswith("rejected-")]
+    ids = [i for i in all_ids if not i.startswith(("rejected-", "open-"))]
     mode = os.environ.get("FAKE_CLAUDE_PROPOSALS", "ok")
     if mode == "invalid_json":
         return "this is not json ["
@@ -145,6 +145,9 @@ def _proposals_result(stdin_text: str) -> object:
     if mode == "echo_rejected":
         rejected = [i for i in all_ids if i.startswith("rejected-")]
         return [_proposal("Cites a rejected example", rejected[:1] or ["rejected-none"])]
+    if mode == "echo_open":
+        opened = [i for i in all_ids if i.startswith("open-")]
+        return [_proposal("Cites an open proposal", opened[:1] or ["open-none"])]
     if mode == "held_guess":
         return [_proposal("Guess at a held item", ["t-term"])]
     if mode == "canary":

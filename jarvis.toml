@@ -3,7 +3,7 @@
 # Thresholds are reviewed weekly against logged corrections (report section 4a).
 
 [meta]
-version = "1.1.0"
+version = "1.2.0"
 phase = "2"
 # Generic placeholders. The real values live in the gitignored jarvis.local.toml.
 machine = "your-machine"
@@ -250,7 +250,7 @@ timeout_s = 20                     # per gh call
 port = 8765
 refresh_s = 30                     # an open page re-fetches itself this often; 0 turns the script off
 audit_rows = 50                    # rows on the Audit view
-stale_days = 14                    # Projects view: stale badge after this many days without a commit, checkout or pull
+# stale_days = 14                  # Projects view: stale badge once a repo shows no commit or uncommitted change in the digests for this many days (the default; commented out so a daemon still running older code keeps accepting this file)
 # allowed_hosts = []               # extra Host header names, for `tailscale serve`; the tailnet name is private, set it in jarvis.local.toml
 
 # ---------------------------------------------------------------------------------------
@@ -313,7 +313,7 @@ adapter = "markdown"               # markdown | clickup
 #   [tracker.clickup]
 #   default_list_id = ""            # digits; used when a project has no entry below
 #   status = ""                     # empty: the list's default status; statuses differ per space
-#   dry_run = false                 # true logs the exact request to the audit log and sends nothing
+#   dry_run = false                 # true builds the exact request, shows it in the Inbox message and sends nothing (the audit log keeps only its size and hash)
 #   timeout_s = 15.0
 #   api_base = "https://api.clickup.com/api/v2"   # http is accepted only for a loopback host
 #

@@ -198,6 +198,8 @@ def build_parser() -> argparse.ArgumentParser:
     q.add_argument("--title", default=None, help="edit: replace the title before confirming")
     q.add_argument("--project", default=None, help="edit: replace the project before confirming")
     q.add_argument("--due", default=None, metavar="YYYY-MM-DD", help="edit: set the due date before confirming")
+    q.add_argument("--confirm-anyway", action="store_true",
+                   help="create the task although an earlier attempt ended with an unknown outcome (it may duplicate)")
     q = proposals_sub.add_parser("reject", help="reject a proposal; the reason teaches the next proposals run")
     q.add_argument("id", help="the proposal id")
     q.add_argument("--reason", required=True, help="why (required)")

@@ -3,25 +3,26 @@
 All notable changes to this project. Dates are the day the work was verified on the author's
 machine. The format follows Keep a Changelog; versions are not published to PyPI.
 
-## Unreleased
+## 1.2.0 - 2026-10-06
 
 The work hub moves from a viewer to a cockpit that can turn a proposal into a task, and only on a
-click. The version number is chosen at release (planned: 1.2.0). Each entry says what was run.
-Nothing below spent money: no paid proposals run was made and ClickUp was never called. The hub
-is no longer GET only: the Inbox adds three POST routes.
+human decision. Each entry says what was run. Nothing below spent money: no paid proposals run was
+made and ClickUp was never called. The hub is no longer GET only: the Inbox adds three POST routes.
+A review pass after the build found the problems listed under Fixed; they are fixed in this release.
 
 ### Added: built and tested offline
 - Q1, task proposals (`jarvis propose`, `jarvis proposals`, `jarvisd/propose.py`, `docs/proposals.md`):
-  one capped Claude call turns the latest complete digest run's cleared items into at most
-  `[propose].max_proposals` proposals under `state/proposals/`. Same gates, sealed payload and
+  one capped Claude call turns the work items into at most `[propose].max_proposals` proposals under
+  `state/proposals/`. It is anchored on the latest complete digest run, but the items are collected and
+  gated again when it runs (the digest manifest holds counts and hashes, not item ids). Same gates, sealed payload and
   isolated argv as the digest; held items appear as ids only; every evidence id is checked against
   what was sent; the 20 newest rejected proposals are sent back as negative examples. Off by
   default. Only the dry run was ever executed against real state.
 - Q2, tracker adapters (`jarvis tracker check`, `jarvisd/tracker.py`): a `markdown` adapter that
   appends to `raw/jarvis/confirmed-tasks.md` through the single vault writer, and a `clickup`
   adapter that creates one task through the ClickUp REST API with a token read from a named
-  environment variable. A `dry_run` switch logs the exact request instead of sending it, and
-  every attempt is audited. The ClickUp adapter has only met a local stand-in server.
+  environment variable. A `dry_run` switch builds the exact request and shows it to you instead of
+  sending it, and every attempt is audited. The ClickUp adapter has only met a local stand-in server.
 - Q3, Projects and Ledger views in the hub: one row per configured repository with fixed-rule
   risks, and a record of what was delivered, built from the digest notes, the proposals and the
   run manifests. They run no git and ask no model. New keys `[hub].stale_days` and
@@ -38,6 +39,38 @@ is no longer GET only: the Inbox adds three POST routes.
 ### Changed
 - `[propose]` and `[tracker]` tables are appended to `jarvis.toml` (both adapters and the job are
   inert by default). `models.Proposal.tracker_ref` accepts a `file:` link as well as http and https.
+- The daemon now enqueues the proposals job right after a complete digest, and again on every tick,
+  once per date (`jarvisd/daemon.py`, `propose.reconcile_proposals`). It is inert while
+  `[propose].enabled` is false, which is the shipped default.
+- The hub's POST check compares `Origin` with the `Host` header instead of a fixed loopback address.
+- The Projects view shows days idle with a plus sign when the repository has no activity in any digest
+  on file, and the Ledger and its monthly sum include the proposals runs.
+- Versions agree everywhere: package, `jarvis.toml [meta]`, citation and changelog are 1.2.0.
+
+### Fixed
+- An ambiguous tracker outcome (timeout, dropped connection, 5xx, an answer that is not a task, a
+  crash between the call and the save) no longer says "still open" and invites a second click that
+  would duplicate the task. The Inbox writes a `<id>.attempt` marker before every send, refuses a plain
+  second confirm while it exists, and offers an explicit Confirm anyway (`--confirm-anyway`).
+- Confirm now gates the text again: the title, project and rationale as they will be sent go through
+  the tier gate, an evidence id that is held stops the confirm, and an edited title or project is
+  scanned. Links, images and HTML in the model's text are reduced to their words, in the proposals
+  job and in both tracker adapters, so a remote image cannot make Obsidian fetch a URL.
+- A retried proposals job no longer rewrites a proposal file that exists, so it cannot undo a rejection.
+  The proposals window is at least `window_hours_default` hours even after a forced digest rerun. The
+  model is shown the live proposals so it does not re-propose standing work in new words.
+- The hub no longer answers 500 to a form with too many fields, and its Origin check works from
+  `http://localhost` and through `tailscale serve`, where every Inbox button used to be refused.
+- A ClickUp dry run needs no token, and its audit record keeps ids, size and hash instead of the
+  request text. `proposal_created`, `proposal_confirmed`, `proposal_confirm_failed` and
+  `proposal_rejected` carry the digest id as `digest_run_id` and no longer overwrite the audit
+  envelope's `run_id`.
+- The tracked `jarvis.toml` no longer carries `[hub].stale_days`, which a daemon still running 1.1.0
+  rejected, stopping its job ticks. The default (14) lives in code.
+- The Projects stale badge can fire for a repository with no recorded activity.
+- Documentation: the README test badge, status row, command table and next steps, the hub and
+  proposals pages (Origin, the audit contents, transitive imports, the terminal door, the stale
+  definition), and the example local file's `[hub.task_projects]` key.
 
 ## 1.1.0 - 2026-10-05
 

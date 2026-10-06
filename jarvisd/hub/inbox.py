@@ -18,7 +18,7 @@ from jarvisd.hub.data import HubData
 from jarvisd.hub.mdhtml import section
 from jarvisd.hub.views import _safe_href, clip, esc, fmt_ts, pill
 from jarvisd.models import Proposal
-from jarvisd.propose import load_proposals, proposals_dir
+from jarvisd.propose import load_proposals, proposals_dir, read_attempt
 
 HELD_HEADING = "Held back and not summarized"
 _LEAD = re.compile(r"^\s*(?:[-*]|\d+\.)\s+")
@@ -79,8 +79,21 @@ def _csrf(token: str) -> str:
     return f'<input type="hidden" name="csrf" value="{esc(token)}">'
 
 
-def _card(p: Proposal, rows: list[dict[str, str]], token: str) -> str:
+def _warning(attempt: dict[str, str | None]) -> str:
+    where = attempt["tracker"] or "the tracker"
+    when = f" at {esc(fmt_ts(attempt['ts']))}" if attempt["ts"] else ""
+    why = f" ({esc(attempt['error'])})" if attempt["error"] else ""
+    return ('<div class="banner bad" role="alert">An earlier attempt to create this task in '
+            f"{esc(where)}{when} ended and the outcome is unknown{why}. The task may already exist: look in {esc(where)} "
+            "before using Confirm anyway, which can create a duplicate. If it is there, reject this proposal.</div>")
+
+
+def _card(p: Proposal, rows: list[dict[str, str]], token: str, attempt: dict[str, str | None] | None = None) -> str:
     base = f"/inbox/{esc(p.id)}"
+    # With an unresolved attempt both forms carry the explicit override, and the button says so.
+    override = '<input type="hidden" name="override" value="1">' if attempt else ""
+    label = "Confirm anyway" if attempt else "Confirm"
+    edit_label = "Edit and confirm anyway" if attempt else "Edit and confirm"
     facts = [("Suggested status", p.suggested_status), ("Due hint", p.due_hint.isoformat() if p.due_hint else "none"),
              ("Run", p.run_id), ("Created", fmt_ts(p.created_at)), ("Id", p.id)]
     dl = "".join(f"<div><dt>{esc(k)}</dt><dd>{esc(v)}</dd></div>" for k, v in facts)
@@ -89,16 +102,17 @@ def _card(p: Proposal, rows: list[dict[str, str]], token: str) -> str:
         f"<h2>{esc(p.title)} {pill(p.kind)} {pill(p.project)}</h2>"
         f'<dl class="facts">{dl}</dl>'
         f"<p>{esc(p.rationale)}</p>"
+        f"{_warning(attempt) if attempt else ''}"
         f"<h3>Evidence</h3>{_evidence_html(rows)}"
         '<div class="actions">'
-        f'<form method="post" action="{base}/confirm" class="inline">{_csrf(token)}'
-        '<button type="submit" class="primary">Confirm</button></form>'
+        f'<form method="post" action="{base}/confirm" class="inline">{_csrf(token)}{override}'
+        f'<button type="submit" class="primary">{label}</button></form>'
         '<details><summary>Edit and confirm</summary>'
-        f'<form method="post" action="{base}/edit" class="stack">{_csrf(token)}'
+        f'<form method="post" action="{base}/edit" class="stack">{_csrf(token)}{override}'
         f'<label>Title <input type="text" name="title" value="{esc(p.title)}" maxlength="120"></label>'
         f'<label>Project <input type="text" name="project" value="{esc(p.project)}" maxlength="80"></label>'
         f'<label>Due <input type="date" name="due" value="{esc(p.due_hint.isoformat() if p.due_hint else "")}"></label>'
-        '<button type="submit" class="primary">Edit and confirm</button></form></details>'
+        f'<button type="submit" class="primary">{edit_label}</button></form></details>'
         '<details><summary>Reject</summary>'
         f'<form method="post" action="{base}/reject" class="stack">{_csrf(token)}'
         '<label>Reason, required (it teaches the next proposals run) '
@@ -137,5 +151,7 @@ def view(data: HubData, token: str, *, flash: str = "", error: str = "") -> str:
     if not proposals:
         body = '<p class="empty">Nothing is waiting for a decision. <code>jarvis propose</code> makes new proposals.</p>'
     else:
-        body = "".join(_card(p, evidence_rows(data, p, held_ids, notes), token) for p in proposals)
+        folder = proposals_dir(data.state_dir)
+        body = "".join(_card(p, evidence_rows(data, p, held_ids, notes), token, read_attempt(folder, p.id))
+                       for p in proposals)
     return head + flash + banner + body

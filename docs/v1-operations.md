@@ -304,7 +304,7 @@ present or absent is in `docs/architecture.md` (gate semantics) and design secti
 Each optional part has its own page, with its status stated at the top:
 
 - Phone push through a self-hosted ntfy: `docs/notify-ntfy.md`.
-- The read-only work hub on loopback: `docs/hub.md`.
+- The work hub on loopback, read-only except the Inbox: `docs/hub.md`.
 - Nightly memory candidates (`jarvis consolidate`): `docs/consolidation.md`.
 - The ClickUp section and `jarvis ask`: above on this page.
 

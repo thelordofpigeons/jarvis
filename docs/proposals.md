@@ -2,18 +2,20 @@
 
 What this is: a job that reads the same work items the morning digest reads, asks Claude once
 for a short list of task proposals, and saves each one as a file. A proposal is a suggestion
-with evidence. It becomes a task in a tracker only when you confirm it in the hub Inbox, and
-that click is the only place an outward action happens (see [hub](hub.md)).
+with evidence. It becomes a task in a tracker only when you confirm it, with a click in the hub
+Inbox or with `jarvis proposals confirm` in a terminal. That human decision, by either door, is the
+only outward action; nothing else creates a task (see [hub](hub.md)).
 
 ```
 jarvis propose --dry-run   # print the exact payload and the held list; no call, no write, no job
 jarvis propose             # one real run; needs [propose].enabled = true, or --force once
 jarvis proposals           # list open proposals; --all adds confirmed, edited and rejected ones
-jarvis proposals confirm <id> [--title T --project P --due YYYY-MM-DD]
+jarvis proposals confirm <id> [--title T --project P --due YYYY-MM-DD] [--confirm-anyway]
 jarvis proposals reject <id> --reason "why"
 ```
 
-The last two do what the Inbox buttons do, through the same code.
+The last two do what the Inbox buttons do, through the same code. `--confirm-anyway` is the
+explicit override after an earlier attempt whose outcome is unknown, see [hub](hub.md).
 
 ## Status, stated plainly
 
@@ -29,8 +31,10 @@ The last two do what the Inbox buttons do, through the same code.
 
 ## How a run works
 
-1. **Anchor.** The newest digest run whose manifest says `complete` fixes the run id and the time
-   window. With no such run the job ends as `no_digest` and calls nothing.
+1. **Anchor.** The newest digest run whose manifest says `complete` fixes the run id. The time
+   window is the digest job's, widened to at least `[digest].window_hours_default` hours, because a
+   forced digest rerun starts at the watermark and its own window can be a few minutes. With no
+   complete run the job ends as `no_digest` and calls nothing.
 2. **Collect again.** Only the local sources run: the notes vault, the active task, local git and
    the GitHub read. The ClickUp section is never run (it makes a paid call of its own) and the
    deterministic system lines are never sent.
@@ -49,8 +53,10 @@ The last two do what the Inbox buttons do, through the same code.
 
 The daemon queues the job right after a complete digest when `[propose].run_after_digest` is
 true, and again on every tick, once per date. `jarvis propose` runs it by hand. A retry of the
-same job writes the same ids, so nothing is created twice, and a paid answer whose write failed
-is kept in `state/runs/<job>/proposals-draft.json` and reused on the next attempt.
+same job derives the same ids, and a proposal file that already exists is never rewritten: the
+owner may have rejected it between two attempts, and a rewrite would undo that and lose the reason.
+A paid answer whose write failed is kept in `state/runs/<job>/proposals-draft.json` and reused on
+the next attempt.
 
 ## What enters the payload, and what never does
 
@@ -58,6 +64,7 @@ is kept in `state/runs/<job>/proposals-draft.json` and reused on the next attemp
 |---|---|
 | Items whose gate result routes to Claude: notes, the active task, git and GitHub facts | Held items (the tier gate, or the work policy): referenced by opaque id and reason code only, never summarized |
 | The last 20 rejected proposals as short negative examples (title, reason), after the same gates | Anything from the ClickUp section, the system lines, or a file the tier gate refused to open |
+| The 30 newest live proposals (open, confirmed or edited) as rows with an `open-` id: title and a short rationale, after the same gates, so the model does not re-propose standing work in new words | The `rejected-` and `open-` rows as evidence: they are never valid citations |
 | A header with the date, the window and the maximum number of proposals | Free text a proposal later carries into a tracker: that text comes from the checked reply, not from the items |
 
 On a machine where the work policy holds repository facts (`work_metadata_to_claude = false`),
@@ -69,12 +76,15 @@ The checks on the reply, all in code:
 - It must be a JSON array. An element with an unknown key, a wrong type, a bad `kind` or a due
   date that is not `YYYY-MM-DD` is dropped alone.
 - Every evidence id must be an id that was really sent as a work item. One id outside that set
-  drops the whole proposal, and so does citing a rejected example.
-- Text is flattened to one line, stripped of dashes, markup and wikilink brackets, clipped to its
-  limit and scanned again for sensitive terms.
+  drops the whole proposal, and so does citing a rejected example or an open proposal.
+- Text is flattened to one line, stripped of dashes, tags, wikilink brackets and Markdown links and
+  images (the words stay, the target goes, because a note opened in Obsidian would fetch a remote
+  image), clipped to its limit and scanned again for sensitive terms.
 - The id, creation time, run id and status are assigned by the program, never read from the reply.
 - A title that matches a live proposal (proposed, confirmed or edited, compared with case, accents
   and punctuation folded) is dropped as a duplicate. Rejected ones are not compared on purpose.
+  Matching titles cannot catch the same work in other words; that is what the `open-` rows are for,
+  and it stays a request to the model, not a guarantee.
 - At most `[propose].max_proposals` survive (default 8).
 
 ## The rejection feedback loop
