@@ -185,11 +185,23 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--date", default=None, metavar="YYYY-MM-DD")
     p.add_argument("--force", action="store_true", help="on an existing date write candidates-<date>-r2.md")
 
+    p = sub.add_parser("propose", help="turn the latest digest run's cleared items into task proposals (spec 1c)")
+    p.add_argument("--dry-run", action="store_true", help="print the payload and the held list, spawn nothing")
+    p.add_argument("--force", action="store_true",
+                   help="run although [propose].enabled is false, and again on a date that already ran")
+
+    p = sub.add_parser("proposals", help="list the task proposals under state/proposals")
+    p.add_argument("--all", action="store_true", help="include confirmed, edited and rejected proposals")
+
     p = sub.add_parser("clickup", help="ClickUp section: verify the claude -p flag set on this machine")
     clickup_sub = p.add_subparsers(dest="clickup_command", required=True, metavar="action")
     q = clickup_sub.add_parser("check", help="free checks; --live adds one real call (up to [digest].clickup_max_budget_usd)")
     q.add_argument("--live", action="store_true", help="make the one paid call against the real connector and record the result")
     q.add_argument("--json", action="store_true")
+
+    p = sub.add_parser("tracker", help="tracker adapters (markdown default, ClickUp): readiness check, sends nothing")
+    tracker_sub = p.add_subparsers(dest="tracker_command", required=True, metavar="action")
+    tracker_sub.add_parser("check", help="adapter, token present yes/no, list map size, markdown path writable")
 
     p = sub.add_parser("self-test", help="PASS/FAIL checks, exit 1 on any FAIL")
     p.add_argument("--live", action="store_true", help="add the paid smoke (not in this build)")
@@ -866,6 +878,18 @@ def cmd_consolidate(ctx: Ctx, args: argparse.Namespace) -> int:
     return _print_consolidate_result(result)
 
 
+def cmd_propose(ctx: Ctx, args: argparse.Namespace) -> int:
+    from jarvisd import propose  # imported here: it pulls in the collectors and the digest wiring
+
+    return propose.cmd_propose(ctx, args)
+
+
+def cmd_proposals(ctx: Ctx, args: argparse.Namespace) -> int:
+    from jarvisd import propose
+
+    return propose.cmd_proposals(ctx, args)
+
+
 def cmd_clickup(ctx: Ctx, args: argparse.Namespace) -> int:
     from jarvisd.claude import ClaudeClient
     from jarvisd.collectors import clickup
@@ -874,6 +898,14 @@ def cmd_clickup(ctx: Ctx, args: argparse.Namespace) -> int:
     client = ClaudeClient(ctx.cfg, audit, ctx.state(), runner=ctx.claude_runner, enabled=args.live,
                           network_probe=ctx.network_probe)
     return clickup.cmd_check(ctx.cfg, client, audit, ctx.now(), live=args.live, as_json=args.json)
+
+
+def cmd_tracker(ctx: Ctx, args: argparse.Namespace) -> int:
+    from jarvisd import tracker
+
+    ready, lines = tracker.readiness(ctx.cfg, ctx.audit())
+    print("\n".join(lines))
+    return EXIT_OK if ready else EXIT_FAIL
 
 
 def cmd_self_test(ctx: Ctx, args: argparse.Namespace) -> int:
@@ -922,8 +954,9 @@ def cmd_install_task(ctx: Ctx, args: argparse.Namespace) -> int:
 HANDLERS: dict[str, Callable[[Ctx, argparse.Namespace], int]] = {
     "serve": cmd_serve, "run-digest": cmd_run_digest, "status": cmd_status, "digest": cmd_digest,
     "held": cmd_held, "wrong": cmd_wrong, "pause": cmd_pause, "resume": cmd_resume, "audit": cmd_audit,
-    "breaker": cmd_breaker, "local": cmd_local, "ask": cmd_ask, "clickup": cmd_clickup, "hub": cmd_hub, "self-test": cmd_self_test,
-    "install-task": cmd_install_task, "consolidate": cmd_consolidate,
+    "breaker": cmd_breaker, "local": cmd_local, "ask": cmd_ask, "clickup": cmd_clickup, "tracker": cmd_tracker, "hub": cmd_hub, "self-test": cmd_self_test,
+    "install-task": cmd_install_task, "consolidate": cmd_consolidate, "propose": cmd_propose,
+    "proposals": cmd_proposals,
 }
 
 

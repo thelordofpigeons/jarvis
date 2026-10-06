@@ -52,6 +52,7 @@ from jarvisd.collectors.task import TaskCollector
 from jarvisd.common import local_now
 from jarvisd.config import Config, ConfigError
 from jarvisd.consolidate import CONSOLIDATE_KIND, reconcile_consolidation, run_consolidate_job
+from jarvisd.propose import PROPOSE_KIND, reconcile_proposals, run_propose_job
 from jarvisd.digest import Deps, Retry, run_digest_job
 from jarvisd.dispatch import local_state
 from jarvisd.jobstore import JobStore
@@ -227,14 +228,25 @@ def _where(exc: BaseException) -> str:
     return f"{Path(last.filename).name}:{last.lineno}"
 
 
+def _chain_proposals(deps: Deps) -> None:
+    """Queue today's proposals job if a complete digest has just landed. Optional, so never fatal."""
+    try:
+        reconcile_proposals(deps.clock(), deps.cfg, deps.state, deps.store, deps.audit)
+    except Exception as exc:  # noqa: BLE001  the proposals job is optional; it must not fail the digest
+        deps.audit.emit("tick_error", stage="reconcile_proposals", error=type(exc).__name__, where=_where(exc))
+
+
 def _run_claimed(deps: Deps, job: Any, mode: str) -> TickResult:
     """Run one claimed job and apply the outcome. Never lets a job error escape."""
     audit, store = deps.audit, deps.store
     try:
         if job.kind == CONSOLIDATE_KIND:
             run_consolidate_job(job, deps, mode=mode)
+        elif job.kind == PROPOSE_KIND:
+            run_propose_job(job, deps, mode=mode)
         else:
             run_digest_job(job, deps, mode=mode)
+            _chain_proposals(deps)  # a complete digest queues the proposals job right away
     except Retry as retry:
         store.retry(job, retry.error, retry.delay, consume_attempt=retry.consume_attempt)
         if retry.killed:
@@ -296,6 +308,10 @@ def _tick_locked(deps: Deps, now: datetime, task_mode: bool, command_runner: Com
         reconcile_consolidation(now, deps.cfg, state, store, audit)
     except Exception as exc:  # noqa: BLE001  the nightly pass is optional; it must not stop the digest
         audit.emit("tick_error", stage="reconcile_consolidation", error=type(exc).__name__, where=_where(exc))
+    try:
+        reconcile_proposals(now, deps.cfg, state, store, audit)
+    except Exception as exc:  # noqa: BLE001  the proposals job is optional; it must not stop the digest
+        audit.emit("tick_error", stage="reconcile_proposals", error=type(exc).__name__, where=_where(exc))
 
     last = TickResult("idle")
     for _ in range(MAX_JOBS_PER_TICK):

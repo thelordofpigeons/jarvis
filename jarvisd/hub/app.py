@@ -1,4 +1,4 @@
-"""The FastAPI application: six GET views, two static files and a JSON twin of Status.
+"""The FastAPI application: eight GET views, two static files and a JSON twin of Status.
 
 Boundaries, all enforced here and tested:
 - Loopback only. `serve` passes host 127.0.0.1 and there is no host setting to change it.
@@ -105,6 +105,14 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None) -> F
     @app.get("/repos", response_class=HTMLResponse)
     def repos_view() -> HTMLResponse:
         return render("Repos", "Repos", views.repos(data.repos()))
+
+    @app.get("/projects", response_class=HTMLResponse)
+    def projects_view() -> HTMLResponse:
+        return render("Projects", "Projects", views.projects(data.projects(), cfg.hub.stale_days))
+
+    @app.get("/ledger", response_class=HTMLResponse)
+    def ledger_view() -> HTMLResponse:
+        return render("Ledger", "Ledger", views.ledger(data.ledger()))
 
     @app.get("/audit", response_class=HTMLResponse)
     def audit_view() -> HTMLResponse:

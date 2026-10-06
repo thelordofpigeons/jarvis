@@ -240,7 +240,8 @@ def test_canary_never_leaves(tmp_cfg: Config, tmp_path: Path, tmp_vault: Path) -
     write(tmp_vault / "session-checkpoints" / "a.json", json.dumps({"cwd": f"C:/{CANARY}/work"}))
     # A RECENT bullet that shares the tagged session's date is derived-sensitive.
     recent = tmp_vault / "RECENT.md"
-    recent.write_text(recent.read_text(encoding="utf-8").replace(
+    # The conftest bullet is dated 2026-10-04; follow the real clock so it shares the tagged day.
+    recent.write_text(recent.read_text(encoding="utf-8").replace("[2026-10-04]", f"[{prev}]").replace(
         "## Recent Decisions", f"- [{prev}] Synthetic bullet from the tagged day\n\n## Recent Decisions", 1),
         encoding="utf-8", newline="\n")
     set_age(recent, now, 2.0)

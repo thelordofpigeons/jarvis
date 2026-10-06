@@ -265,6 +265,19 @@ class ConsolidateCfg(_Forbid):
         return int(hour), int(minute)
 
 
+class ProposeCfg(_Forbid):
+    """[propose]: the task-proposals job (jarvisd/propose.py, spec 1c "Proposals").
+
+    Off by default: a run spends one Claude call, capped at `max_budget_usd` (which replaces
+    [claude].max_budget_usd for that call, so the reservation and the CLI cap agree).
+    """
+
+    enabled: StrictBool = False
+    max_proposals: int = Field(default=8, ge=1, le=20)
+    max_budget_usd: float = Field(default=0.30, gt=0, le=1.0)
+    run_after_digest: StrictBool = True
+
+
 class ClaudeCfg(_Forbid):
     binary: str = ""
     model: str = "sonnet"
@@ -416,6 +429,11 @@ class HubCfg(_Forbid):
     # Seconds between automatic refreshes of an open page; 0 turns the refresh script off.
     refresh_s: int = Field(default=30, ge=0, le=3600)
     audit_rows: int = Field(default=50, ge=1, le=500)
+    # Projects view: a repo whose HEAD reflog has not moved (commit, checkout, pull) for more than this many days gets the stale badge.
+    stale_days: int = Field(default=14, ge=1, le=365)
+    # Projects view: repo name -> keywords. The active task line is shown under a repo when it contains one
+    # of them (case-insensitive). Real project names live in jarvis.local.toml, never in the tracked file.
+    task_projects: dict[str, list[str]] = Field(default_factory=dict)
 
     @field_validator("allowed_hosts")
     @classmethod
@@ -423,6 +441,72 @@ class HubCfg(_Forbid):
         for host in value:
             if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", host):
                 raise ValueError("allowed_hosts entries are bare host names, no scheme, port or path")
+        return value
+
+
+class TrackerClickUpCfg(_Forbid):
+    """[tracker.clickup]: the REST adapter's settings. Real list ids live only in jarvis.local.toml."""
+
+    # Project name (as the proposal carries it) to ClickUp list id. Private: local file only.
+    lists: dict[str, str] = Field(default_factory=dict)
+    default_list_id: str = ""
+    # Created tasks get this status when set. Statuses differ per space, so there is no default.
+    status: str = Field(default="", max_length=100)
+    # When true the exact request is written to the audit log and nothing is sent.
+    dry_run: StrictBool = False
+    api_base: str = "https://api.clickup.com/api/v2"
+    timeout_s: float = Field(default=15.0, gt=0, le=120)
+
+    @field_validator("lists")
+    @classmethod
+    def _list_ids(cls, value: dict[str, str]) -> dict[str, str]:
+        for project, list_id in value.items():
+            if not project.strip():
+                raise ValueError("lists keys are project names and cannot be empty")
+            if not re.fullmatch(r"[0-9]{1,20}", str(list_id)):
+                raise ValueError("lists values are ClickUp list ids: digits only")
+        return value
+
+    @field_validator("default_list_id")
+    @classmethod
+    def _default_list(cls, value: str) -> str:
+        if value and not re.fullmatch(r"[0-9]{1,20}", value):
+            raise ValueError("default_list_id must be digits only, or empty")
+        return value
+
+    @field_validator("api_base")
+    @classmethod
+    def _api_base(cls, value: str) -> str:
+        # The token travels in this request: https, except for a loopback host (tests, a proxy).
+        found = _NTFY_URL_RE.match(value)
+        if found is None:
+            raise ValueError("api_base must be an http or https address without credentials, query or fragment")
+        if found.group(1) == "http" and not _LOOPBACK_HOST_RE.match(found.group(2).casefold()):
+            raise ValueError("api_base must use https unless the host is loopback")
+        return value.rstrip("/")
+
+
+class TrackerCfg(_Forbid):
+    """[tracker]: where a confirmed proposal becomes a task. Markdown is the default and safe."""
+
+    adapter: str = "markdown"  # markdown | clickup
+    # NAME of the environment variable holding the ClickUp personal token. The value is never
+    # read from a file and never reaches a config, a log or an audit record.
+    clickup_token_env: str = "JARVIS_CLICKUP_TOKEN"
+    clickup: TrackerClickUpCfg = Field(default_factory=TrackerClickUpCfg)
+
+    @field_validator("adapter")
+    @classmethod
+    def _adapter(cls, value: str) -> str:
+        if value not in ("markdown", "clickup"):
+            raise ValueError("adapter must be markdown or clickup")
+        return value
+
+    @field_validator("clickup_token_env")
+    @classmethod
+    def _token_env(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value):
+            raise ValueError("clickup_token_env must be an environment variable name, not the token")
         return value
 
 
@@ -451,7 +535,9 @@ class Config(BaseModel):
     queue: QueueCfg = Field(default_factory=QueueCfg)
     hygiene: HygieneCfg = Field(default_factory=HygieneCfg)
     consolidate: ConsolidateCfg = Field(default_factory=ConsolidateCfg)
+    propose: ProposeCfg = Field(default_factory=ProposeCfg)
     hub: HubCfg = Field(default_factory=HubCfg)
+    tracker: TrackerCfg = Field(default_factory=TrackerCfg)
     # sha256 of the merged raw config. Recorded in every job so a run names its own rules.
     sha256: str = ""
 

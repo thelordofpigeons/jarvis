@@ -100,7 +100,7 @@ Next steps, in order:
 2. Add a held-item triage job, so sensitive items are summarized locally instead of only held.
 3. Validate the optional parts against the real services (ClickUp connector, ntfy server) and look at the hub page in a browser.
 4. Trip the elevated kill switch once against the live daemon, at the machine, and recover from it (see "How to verify" in the [patch](docs/killswitch-v1-patch.md)).
-5. Take later phases only where they earn their place: security tooling, retrieval, perception, voice.
+5. Take later phases only where they earn their place.
 
 ## Privacy model
 
@@ -118,8 +118,8 @@ Next steps, in order:
 
 | Command | What it does |
 |---|---|
-| `jarvis serve` | the resident loop; `--task` is task mode with Claude on, plain `serve` runs with Claude off |
-| `jarvis run-digest` | build today's digest now; `--claude` allows the one paid call, `--dry-run` prints the payload only |
+| `jarvis serve` | the resident loop; `--task` turns Claude on, plain `serve` leaves it off |
+| `jarvis run-digest` | build today's digest now; `--claude` allows the one paid call, `--dry-run` prints the payload |
 | `jarvis status` | daemon heartbeat, budget, queue and last digest |
 | `jarvis digest` | print the latest digest, or its path |
 | `jarvis held` | resolve a held id to its source and reason, in the terminal only |
@@ -130,9 +130,11 @@ Next steps, in order:
 | `jarvis breaker` | `status`, or `reset` with a reason |
 | `jarvis local` | `status` and `check` of the local model tier; downloads nothing |
 | `jarvis hub` | the read-only web page on loopback; `--check` renders every view |
-| `jarvis ask` | answer one question from the latest digest and recent notes, one capped call |
+| `jarvis ask` | answer one question from the latest digest and notes, one capped call |
 | `jarvis consolidate` | propose memory candidates from session notes (off by default) |
+| `jarvis propose` `jarvis proposals` | make, then list, task proposals (off by default) |
 | `jarvis clickup` | `check` the flag set for the optional ClickUp section; `--live` makes one paid call |
+| `jarvis tracker` | `check` which task tracker is ready; sends nothing |
 | `jarvis self-test` | PASS, FAIL and SKIP checks; exit 1 on any FAIL |
 | `jarvis install-task` | print or run the Task Scheduler registration |
 
@@ -152,11 +154,11 @@ One real digest call is recorded in [first-run log](docs/first-run-log.md): 0.00
 ## Docs
 
 - [Architecture](docs/architecture.md): processes, layers, modules, gates and the Claude call.
-- [Operations](docs/v1-operations.md): the operator manual: start, stop, pause, audit, incident runbook, known gaps.
+- [Operator manual](docs/v1-operations.md): start, stop, pause, audit, incident runbook, known gaps.
 - [First-run log](docs/first-run-log.md): what the first real run showed.
 - [Vault layout](docs/vault-layout.md): what the notes collector reads, what it writes, and what a fresh install shows.
 - [Publishing](docs/publishing.md): the rules for publishing the repository, including its history.
-- [Design](docs/v1-design.md) and [plan](docs/v1-plan.md): the full design with its decisions and the build plan.
+- [Design](docs/v1-design.md) and [plan](docs/v1-plan.md): the design, its decisions and the build plan.
 - [Phase 0](docs/phase0.md), [runbook](docs/phase0-runbook.md) and [sandbox policy](docs/sandbox-policy.md): isolation, the kill switch and the sandbox policy.
 - [Kill switch v1 patch](docs/killswitch-v1-patch.md): how the kill switch was extended to the v1 daemon, what it does step by step, and how to verify it.
 - Optional parts, each with its status on top: [local tier](docs/local-tier.md), [hub](docs/hub.md), [consolidation](docs/consolidation.md) and [ntfy](docs/notify-ntfy.md).

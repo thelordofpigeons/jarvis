@@ -7,6 +7,8 @@ only move data between our own modules are plain.
 from __future__ import annotations
 
 import json
+import re
+from datetime import date
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -295,3 +297,67 @@ class RunManifest(_Model):
     hashes: dict[str, str] = Field(default_factory=dict)
     config_sha256: str | None = None
     audit_seq: int | None = None
+
+
+# --- proposals (jarvisd/propose.py) ----------------------------------------------------------
+
+ProposalKind = Literal["task", "decision", "followup", "risk"]
+ProposalStatus = Literal["proposed", "confirmed", "rejected", "edited_confirmed"]
+PROPOSAL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+PROPOSAL_RATIONALE_MAX = 240
+
+
+class ProposalEdits(_Model):
+    """What the owner changed before confirming. A missing key means 'as proposed'."""
+
+    title: str | None = Field(default=None, min_length=1, max_length=120)
+    project: str | None = Field(default=None, min_length=1, max_length=80)
+    due: date | None = None
+
+    @field_validator("title", "project")
+    @classmethod
+    def _no_dashes(cls, value: str | None) -> str | None:
+        return None if value is None else strip_dashes(value)  # house rule: no em or en dashes
+
+
+class Proposal(_Model):
+    """One task proposal, stored as state/proposals/<id>.json.
+
+    Everything except `status`, `tracker_ref`, `rejected_reason` and `edits` is written once by
+    the proposals job. Those four change only through a human action in the Inbox or the CLI.
+    `evidence` holds item ids of the run that were cleared for Claude; it never holds text.
+    """
+
+    id: str = Field(pattern=PROPOSAL_ID_PATTERN)
+    created_at: IsoStr
+    run_id: str = Field(min_length=1, max_length=120)
+    title: str = Field(min_length=1, max_length=120)
+    project: str = Field(min_length=1, max_length=80)
+    kind: ProposalKind
+    evidence: list[str] = Field(min_length=1, max_length=8)
+    suggested_status: str = Field(min_length=1, max_length=40)
+    due_hint: date | None = None
+    rationale: str = Field(max_length=PROPOSAL_RATIONALE_MAX)
+    status: ProposalStatus = "proposed"
+    tracker_ref: str | None = Field(default=None, max_length=500)
+    rejected_reason: str | None = Field(default=None, max_length=500)
+    edits: ProposalEdits = Field(default_factory=ProposalEdits)
+
+    @field_validator("title", "project", "suggested_status", "rationale", "rejected_reason")
+    @classmethod
+    def _no_dashes(cls, value: str | None) -> str | None:
+        return None if value is None else strip_dashes(value)
+
+    @field_validator("evidence")
+    @classmethod
+    def _evidence_ids(cls, value: list[str]) -> list[str]:
+        if any(not item or len(item) > 200 or item != item.strip() for item in value):
+            raise ValueError("evidence entries are item ids")
+        return value
+
+    @field_validator("tracker_ref")
+    @classmethod
+    def _tracker_url(cls, value: str | None) -> str | None:
+        if value is not None and not re.fullmatch(r"(https?://|file:///)[^\s]+", value):
+            raise ValueError("tracker_ref is an http, https or file URL (markdown adapter), or null")
+        return value

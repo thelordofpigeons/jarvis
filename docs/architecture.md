@@ -53,7 +53,7 @@ write files and who may read them are enforced by AST tests in `tests/test_write
 - L0 `common`, `config`, `models`: helpers, typed settings, pydantic models.
 - L1 `fsio`, `audit`, `state`, `jobstore`, `vault`: durable IO behind small classes.
 - L2 `tier`, `router`, `dispatch`, `claude`: policy, and the one subprocess call site.
-- L3 `collectors/*`, `render`, `digest`, `notify`, `local`, `ask`, `consolidate`, `hub/*`: job logic.
+- L3 `collectors/*`, `render`, `digest`, `notify`, `local`, `ask`, `consolidate`, `propose`, `hub/*`: job logic.
 - L4 `scheduler`, `daemon`, `cli`, `selftest`: wiring.
 
 Folders, all relative to the repository root unless they start with `~`:
@@ -93,6 +93,8 @@ Folders, all relative to the repository root unless they start with `~`:
 | `jarvisd/digest.py` | the morning digest job handler and the collector registry |
 | `jarvisd/ask.py` | `jarvis ask`: one question answered from the latest digest, recent notes and open threads, through the same gates |
 | `jarvisd/consolidate.py` | nightly memory candidates (see `docs/consolidation.md`) |
+| `jarvisd/propose.py` | task proposals from the latest complete digest run, one gated payload and one capped call, written to `state/proposals/`; creates nothing in a tracker |
+| `jarvisd/tracker.py` | tracker adapters behind one Protocol: markdown (default, through the vault writer) and ClickUp (REST, token from the environment); a human click in the Inbox is the only caller |
 | `jarvisd/notify.py` | notifier protocol: Windows toast, ntfy push (`docs/notify-ntfy.md`), a null notifier |
 | `jarvisd/vault.py` | the only code that writes into the notes vault, three allowed places, enforced by an AST test |
 | `jarvisd/scheduler.py` | idempotent `reconcile` and the APScheduler host |
@@ -226,7 +228,7 @@ did not summarize is listed under "Held back and not summarized" with a reason, 
 A daemon started by hand without `--task` runs with Claude disabled, so there is no unkillable
 spender.
 
-`jarvis ask` and `jarvis consolidate` reuse this client and its ledger without changing the isolation:
+`jarvis ask`, `jarvis consolidate` and `jarvis propose` reuse this client and its ledger without changing the isolation:
 they supply a different constant system prompt and parser. The optional ClickUp section is the one
 exception. It is a separate profile that passes neither `--tools ""` nor `--strict-mcp-config`,
 because the connector is not in a config file and must stay visible to the call. Its isolation is

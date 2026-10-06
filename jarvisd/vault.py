@@ -4,6 +4,10 @@ It takes a relative name, never a path, and allows exactly two places:
 - files directly under <brain>/raw/jarvis/ and under <brain>/raw/jarvis/candidates/
 - <brain>/sessions/jarvis-<slug>.md, and only while [digest].write_session_note is true
 
+One file may also be appended to (APPENDABLE, plan Q2): the human-confirmed task list. The append
+is audited like a write, creates the file from a generator-marked header, and refuses a file
+that lacks the marker, so a hand-made file of the same name is never touched.
+
 Everything else raises VaultWriteDenied and leaves a vault_violation record: telos, notes,
 Documents/Work, '..', absolute paths, drive letters, alternate data streams, junctions and
 symlinks that redirect a directory, and any existing file that is not ours. The vault is
@@ -31,6 +35,9 @@ CANDIDATES_DIR = "candidates"
 SESSION_PREFIX = "jarvis-"
 MARKER_BYTES = 400
 MAX_BYTES = 2_000_000
+# The only raw/jarvis files append_raw accepts. A generator-owned log that grows block by block;
+# every other file the daemon writes is regenerated whole and goes through write_raw.
+APPENDABLE = frozenset({"confirmed-tasks.md"})
 
 # One name component: starts alphanumeric, no spaces, no ':' or '~' or backslash, so a
 # trailing dot or space, a stream suffix and an 8.3 alias cannot even be spelled.
@@ -122,6 +129,27 @@ def _prepare(text: object) -> bytes:
     return data
 
 
+def _prepare_fragment(text: object) -> bytes:
+    """Normalize text that will be appended to a file that already carries the marker."""
+    if not isinstance(text, str):
+        raise VaultWriteDenied("bad_content")
+    body = strip_dashes(text.lstrip("\ufeff").replace("\r\n", "\n").replace("\r", "\n"))
+    return body.encode("utf-8")
+
+
+def _read_all(target: Path) -> bytes:
+    """Whole file, waiting out a sharing violation like _read_head does (FileBusy at the end)."""
+    for attempt in range(len(fsio.BACKOFF_SECONDS) + 1):
+        try:
+            with open(target, "rb") as fh:
+                return fh.read()
+        except PermissionError as exc:
+            if attempt >= len(fsio.BACKOFF_SECONDS):
+                raise fsio.FileBusy(f"could not read {target.name}: {exc}") from exc
+            fsio.time.sleep(fsio.BACKOFF_SECONDS[attempt])
+    raise AssertionError("unreachable")  # pragma: no cover
+
+
 def _read_head(target: Path) -> bytes:
     """First MARKER_BYTES bytes, waiting out a sharing violation like a write would.
 
@@ -155,6 +183,26 @@ class VaultWriter:
     def write_session(self, slug: str, text: str, job_id: str | None) -> WriteResult:
         """Write sessions/jarvis-<slug>.md, only while [digest].write_session_note is true."""
         return self._write("session", slug, text, job_id)
+
+    def append_raw(self, name: str, text: str, job_id: str | None, *, header: str) -> WriteResult:
+        """Append text to raw/jarvis/<name>, creating it from `header` when absent.
+
+        Only names in APPENDABLE. `header` must carry the generator marker (it is the file's
+        first bytes), and an existing file without the marker is refused untouched. There is no
+        "-r2" fallback: splitting an append-only list across two files would hide tasks.
+        """
+        return self._append(name, text, header, job_id)
+
+    def check_append(self, name: str) -> str:
+        """"create" or "append" if append_raw(name) would be allowed now, else VaultWriteDenied.
+
+        Touches nothing and audits nothing: `jarvis tracker check` calls it.
+        """
+        if not isinstance(name, str) or name not in APPENDABLE:
+            raise VaultWriteDenied("not_appendable")
+        plan = self._plan("raw", name)
+        target = self._authorize(plan, plan.filename)
+        return "append" if self._check_marker(target) else "create"
 
     def raw_path(self, name: str) -> Path:
         """Where write_raw(name) would put the file, for readers (jarvis digest, status).
@@ -252,6 +300,53 @@ class VaultWriter:
             self._audit.emit("vault_write", job_id=job_id, kind=kind, rel=rel, sha256=digest, bytes=len(data),
                              ok=False, fallback_used=False, error=type(exc).__name__)
             raise
+
+    def _append(self, name: object, text: object, header: object, job_id: str | None) -> WriteResult:
+        kind = "raw"
+        try:
+            if not isinstance(name, str) or name not in APPENDABLE:
+                raise VaultWriteDenied("not_appendable")
+            plan = self._plan(kind, name)
+            head = _prepare(header)
+            add = _prepare_fragment(text)
+        except VaultWriteDenied as exc:
+            self._violation(kind, name, exc.reason, job_id)
+            raise
+        digest = sha256_hex(add)
+        rel = f"{plan.label}/{plan.filename}"
+        self._audit.emit("vault_intent", job_id=job_id, kind=kind, rel=rel, sha256=digest, bytes=len(add),
+                         op="append")
+        try:
+            return self._commit_append(plan, head, add, digest, rel, job_id)
+        except VaultWriteDenied as exc:
+            self._violation(kind, name, exc.reason, job_id)
+            raise
+        except OSError as exc:
+            self._audit.emit("vault_write", job_id=job_id, kind=kind, rel=rel, sha256=digest, bytes=len(add),
+                             ok=False, fallback_used=False, op="append", error=type(exc).__name__)
+            raise
+
+    def _commit_append(self, plan: _Plan, head: bytes, add: bytes, digest: str, rel: str,
+                       job_id: str | None) -> WriteResult:
+        target = self._authorize(plan, plan.filename)
+        with fsio.path_lock(target):
+            exists = self._check_marker(target)
+            if exists:
+                old = _read_all(target)
+                base = old if old.endswith(b"\n") else old + b"\n"
+            else:
+                base = head
+            data = base + add
+            if len(data) > MAX_BYTES:
+                raise VaultWriteDenied("too_large")
+            try:
+                text = data.decode("utf-8")
+            except UnicodeDecodeError:
+                raise VaultWriteDenied("target_unreadable") from None
+            fsio.atomic_write_text(target, text)
+        self._audit.emit("vault_write", job_id=job_id, kind=plan.kind, rel=rel, intended_rel=rel, sha256=digest,
+                         bytes=len(add), ok=True, fallback_used=False, replaced=exists, op="append")
+        return WriteResult(path=target, rel=rel, sha256=digest, size=len(add), kind=plan.kind, replaced=exists)
 
     def _commit(self, plan: _Plan, data: bytes, digest: str, rel: str, job_id: str | None) -> WriteResult:
         names = [plan.filename, plan.filename[:-3] + "-r2.md"]

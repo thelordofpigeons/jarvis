@@ -17,8 +17,8 @@ from typing import Any
 from jarvisd.common import parse_iso
 from jarvisd.hub.mdhtml import render_markdown
 
-NAV = (("/", "Today"), ("/runs", "Runs"), ("/held", "Held"), ("/repos", "Repos"), ("/audit", "Audit"),
-       ("/status", "Status"))
+NAV = (("/", "Today"), ("/runs", "Runs"), ("/held", "Held"), ("/repos", "Repos"), ("/projects", "Projects"),
+       ("/ledger", "Ledger"), ("/audit", "Audit"), ("/status", "Status"))
 WRONG_CHOICES = "escalate, hold, skip or other"
 
 
@@ -210,6 +210,67 @@ def repos(data: dict[str, Any]) -> str:
     if data["other"]:
         out.append("<h2>Other lines</h2><ul>" + "".join(f"<li>{esc(line)}</li>" for line in data["other"]) + "</ul>")
     return "".join(out)
+
+
+# --- Projects and Ledger -----------------------------------------------------------------------------
+
+
+def _safe_href(url: str) -> str | None:
+    """Only http(s) tracker links become anchors; anything else (javascript:, data:) stays plain text."""
+    return url if url.lower().startswith(("https://", "http://")) else None
+
+
+def projects(rows: list[dict[str, Any]], stale_days: int) -> str:
+    head = ('<h1>Projects</h1><p class="lede">One row per configured repo, from the latest digest notes and the '
+            "proposals folder. Nothing is run live and no model is asked: the risks are fixed rules "
+            f"(stale after {int(stale_days)} days, uncommitted work for 2 days or more, failing CI, overdue active task).</p>")
+    if not rows:
+        return head + '<p class="empty">No repositories configured under [digest].repos.</p>'
+    cells = []
+    for r in rows:
+        name = esc(r["name"]) + (f" {pill('work')}" if r["work"] else "") + (f" {pill('stale', 'warn')}" if r["stale"] else "")
+        if not r["known"]:
+            cells.append([name, '<span class="empty">no digest data</span>', "", "", "", "", "", "",
+                          esc(r["open_proposals"])])
+            continue
+        prs = "" if r["prs"] is None else esc(r["prs"])
+        ci = pill(r["ci"], "bad" if r["ci"] in ("failure", "timed_out", "startup_failure", "action_required")
+                  else ("ok" if r["ci"] == "success" else "")) if r["ci"] else ""
+        days = "" if r["days_since"] is None else esc(r["days_since"])
+        extra = f"<br>{esc(clip(r['task'], 160))}" if r["task"] else ""
+        risks = "".join(pill(x, "bad") + " " for x in r["risks"]) or '<span class="empty">none</span>'
+        cells.append([name, esc(r["branch"]), esc(r["commits"]), f"{r['modified']} / {r['untracked']}", prs, ci, days,
+                      risks + extra, esc(r["open_proposals"])])
+    return head + table([("Repo", ""), ("Branch", ""), ("Commits", "num"), ("Modified / untracked", "num"),
+                         ("Open PRs", "num"), ("CI", ""), ("Days idle", "num"), ("Risks and active task", ""),
+                         ("Open proposals", "num")], cells)
+
+
+def ledger(data: dict[str, Any]) -> str:
+    head = ('<h1>Ledger</h1><p class="lede">What was delivered, newest first: confirmed proposals with their tracker '
+            "link, digests written and consolidation notes. Cost is the run's recorded cost; a proposal has none.</p>")
+    entries = data["entries"]
+    if not entries:
+        return head + '<p class="empty">Nothing delivered yet.</p>'
+    kinds = {"proposal": "Proposal", "digest": "Digest", "consolidation": "Consolidation"}
+    rows = []
+    for e in entries:
+        links = []
+        for url in e["links"]:
+            href = _safe_href(url)
+            links.append(f'<a href="{esc(href)}" rel="noreferrer">{esc(clip(url, 60))}</a>' if href else esc(clip(url, 60)))
+        for ev in e["evidence"]:
+            links.append(f'<a href="{esc(ev)}">note</a>' if ev.startswith("/digest/") else
+                         (f"<code>{esc(ev)}</code>" if e["kind"] == "consolidation" else f"<code>{esc(clip(ev, 24))}</code>"))
+        title = esc(clip(e["title"], 100)) + (f" {pill(e['project'])}" if e["project"] else "")
+        rows.append([esc(fmt_ts(e["stamp"])), esc(kinds[e["kind"]]), title, esc(usd(e["cost"]) if e["cost"] is not None else ""),
+                     " ".join(links)])
+    roll = [[esc(r["month"]), esc(r["count"]), esc(r["proposals"]), esc(r["digests"]), esc(r["notes"]),
+             esc(usd(r["cost"]))] for r in data["rollup"]]
+    return (head + "<h2>Per month</h2>" + table([("Month", ""), ("Delivered", "num"), ("Proposals", "num"), ("Digests", "num"),
+                                                 ("Notes", "num"), ("USD", "num")], roll)
+            + "<h2>Delivered</h2>" + table([("When", ""), ("Kind", ""), ("What", ""), ("USD", "num"),
+                                            ("Evidence", "")], rows))
 
 
 # --- Audit -----------------------------------------------------------------------------------------

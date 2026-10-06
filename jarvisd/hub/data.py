@@ -54,6 +54,54 @@ _REPO_LINE = re.compile(
 _ITEM_ID = re.compile(r"\[([0-9a-f]{8})\]")
 
 
+# Projects view: how much digest history is read, and the fixed risk threshold for uncommitted work.
+_HISTORY_DIGESTS = 60
+DIRTY_RISK_DAYS = 2
+_FAILING_CI_TOKENS = frozenset({"failure", "timed_out", "startup_failure", "action_required"})
+_GH_LINE = re.compile(r"^- GitHub (?P<name>\S+?)(?: \(work\))?: (?P<rest>.*)$")
+_GH_QUIET = re.compile(r"(?P<name>[^\s,()]+) \((?P<bits>[^)]*)\)")
+_PRS = re.compile(r"^(\d+) open PRs?\b")
+_COMMA_OUTSIDE_PARENS = re.compile(r",\s*(?![^()]*\))")
+
+
+def _ci_token(parts: list[str]) -> str:
+    for part in parts:
+        part = part.strip()
+        if part == "no CI runs":
+            return "none"
+        if part.startswith("CI "):
+            return re.sub(r"[^a-z0-9_]+", "_", part[3:].split(" on ")[0].lower()).strip("_") or "unknown"
+    return ""
+
+
+def _parse_repo_lines(lines: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """(git facts by repo name, github facts by repo name) from the digest Repos section. A repo named in the
+    Quiet line has zero counts; one that is in neither is simply absent, so nothing is invented for it."""
+    git: dict[str, dict[str, Any]] = {}
+    gh: dict[str, dict[str, Any]] = {}
+    for line in lines:
+        text = line.strip()
+        if text.startswith("- Quiet:"):
+            for name in text[len("- Quiet:"):].rstrip(". ").split(","):
+                if name.strip():
+                    git.setdefault(name.strip(), {"branch": "", "commits": 0, "modified": 0, "untracked": 0})
+        elif text.startswith("- GitHub quiet:"):
+            for m in _GH_QUIET.finditer(text[len("- GitHub quiet:"):]):
+                gh[m.group("name")] = {"prs": 0, "ci": _ci_token(m.group("bits").split(","))}
+        elif text.startswith("- GitHub "):
+            m = _GH_LINE.match(_ITEM_ID.sub("", text).strip())
+            if m:
+                parts = _COMMA_OUTSIDE_PARENS.split(m.group("rest").split(": ", 1)[0])
+                prs = _PRS.match(parts[0].strip())
+                gh[m.group("name")] = {"prs": int(prs.group(1)) if prs else 0, "ci": _ci_token(parts[1:])}
+        else:
+            m = _REPO_LINE.match(text)
+            if m:
+                git[m.group("name")] = {"branch": m.group("branch") or "", "commits": int(m.group("commits")),
+                                        "modified": int(m.group("modified")), "untracked": int(m.group("untracked"))}
+    return git, gh
+
+
 def _read_json(path: Path) -> Any | None:
     """A JSON file, or None for missing, unreadable or malformed. Retries a Windows sharing clash."""
     for attempt in range(4):
@@ -323,6 +371,155 @@ class HubData:
             row["witness"] = self.witness(row["audit_seq"])
             out.append(row)
         return sorted(out, key=lambda r: (r["stamp"], r["job_id"]), reverse=True)
+
+    # --- projects and ledger ---------------------------------------------------------------------
+
+    def proposals(self) -> list[dict[str, Any]]:
+        """state/proposals/*.json as plain dicts, defensively: a missing folder is zero proposals, a file that is
+        not a JSON object is skipped. `decided_at` is the file mtime (the proposal has no decision stamp)."""
+        out: list[dict[str, Any]] = []
+        for path in _json_files(self.state_dir / "proposals"):
+            raw = _read_json(path)
+            if not isinstance(raw, dict):
+                continue
+            try:
+                decided = iso(datetime.fromtimestamp(path.stat().st_mtime, tz=self.now().tzinfo))
+            except OSError:
+                continue
+            evidence = raw.get("evidence")
+            ref = raw.get("tracker_ref")
+            out.append({"id": str(raw.get("id") or path.stem), "title": str(raw.get("title") or ""),
+                        "project": str(raw.get("project") or ""), "status": str(raw.get("status") or ""),
+                        "tracker_ref": ref if isinstance(ref, str) and ref else None,
+                        "evidence": [str(e) for e in evidence] if isinstance(evidence, list) else [],
+                        "decided_at": decided})
+        return out
+
+    def _digest_history(self) -> list[dict[str, Any]]:
+        """Parsed Repos and Active task sections of the newest digest notes, oldest first, one per day."""
+        by_day: dict[date, dict[str, Any]] = {}
+        for path in self.digest_files()[-_HISTORY_DIGESTS:]:
+            note = self.read_digest(path)
+            m = re.match(r"^digest-(\d{4}-\d{2}-\d{2})", note["job_id"]) if note else None
+            if note is None or m is None:
+                continue
+            repos, github = _parse_repo_lines(section(note["body"], "Repos"))
+            day = date.fromisoformat(m.group(1))
+            # Files come oldest first and a forced rerun sorts after its original, so the later note wins.
+            by_day[day] = {"date": day, "repos": repos, "github": github,
+                           "task": " ".join(" ".join(section(note["body"], "Active task")).split())}
+        return [by_day[d] for d in sorted(by_day)]
+
+    def projects(self) -> list[dict[str, Any]]:
+        """One row per [digest].repos entry, in config order, derived only from the digest notes, the proposals
+        folder and the config: the hub runs no git and no model. Risks are fixed rules (docs/hub.md)."""
+        history = self._digest_history()
+        today = self.now().date()
+        proposals = self.proposals()
+        latest = history[-1] if history else None
+        rows: list[dict[str, Any]] = []
+        for repo in self.cfg.digest.repos:
+            name = repo.name
+            facts = latest["repos"].get(name) if latest else None
+            gh = latest["github"].get(name, {}) if latest else {}
+            # Activity is a commit or any uncommitted change in a digest: the notes carry no commit dates.
+            active: date | None = None
+            for day in history:
+                seen = day["repos"].get(name)
+                if seen and (seen["commits"] or seen["modified"] or seen["untracked"]):
+                    active = day["date"]
+            dirty_since: date | None = None
+            if facts and (facts["modified"] or facts["untracked"]):
+                for day in reversed(history):
+                    seen = day["repos"].get(name)
+                    if not (seen and (seen["modified"] or seen["untracked"])):
+                        break
+                    dirty_since = day["date"]
+            known = facts is not None
+            days_since = (today - active).days if (known and active is not None) else None
+            dirty_days = (today - dirty_since).days if dirty_since is not None else None
+            stale = days_since is not None and days_since >= self.cfg.hub.stale_days
+            keywords = [k.lower() for k in self.cfg.hub.task_projects.get(name, []) if k]
+            task = latest["task"] if latest else ""
+            task_line = task if (task and any(k in task.lower() for k in keywords)) else ""
+            risks: list[str] = []
+            if stale:
+                risks.append(f"stale repo, no activity for {days_since} days")
+            if dirty_days is not None and dirty_days >= DIRTY_RISK_DAYS:
+                risks.append(f"uncommitted work for {dirty_days} days")
+            if gh.get("ci") in _FAILING_CI_TOKENS:
+                risks.append("CI failing")
+            if "(OVERDUE)" in task_line:
+                risks.append("active task overdue")
+            rows.append({
+                "name": name, "work": repo.work, "known": known,
+                "branch": facts["branch"] if facts else "",
+                "commits": facts["commits"] if facts else 0,
+                "modified": facts["modified"] if facts else 0,
+                "untracked": facts["untracked"] if facts else 0,
+                "prs": gh.get("prs"), "ci": gh.get("ci", ""),
+                "days_since": days_since, "dirty_days": dirty_days, "stale": stale,
+                "task": task_line, "risks": risks,
+                "open_proposals": sum(1 for p in proposals if p["project"] == name and p["status"] == "proposed"),
+            })
+        return rows
+
+    def _manifests(self) -> list[tuple[str, RunManifest]]:
+        found: list[tuple[str, RunManifest]] = []
+        try:
+            paths = sorted((self.state_dir / "runs").glob("*/run.json"))
+        except OSError:
+            return found
+        for path in paths:
+            raw = _read_json(path)
+            if not isinstance(raw, dict):
+                continue
+            try:
+                found.append((path.parent.name, RunManifest.model_validate(raw)))
+            except ValidationError:
+                continue
+        return found
+
+    def ledger(self) -> dict[str, Any]:
+        """Everything delivered, newest first, plus a rollup per month. Delivered means a confirmed proposal with a
+        tracker link, a digest run that wrote a note, or a consolidation run that wrote its candidates note."""
+        entries: list[dict[str, Any]] = []
+        for p in self.proposals():
+            if p["status"] in ("confirmed", "edited_confirmed") and p["tracker_ref"]:
+                entries.append({"kind": "proposal", "stamp": p["decided_at"], "ref": p["id"], "title": p["title"],
+                                "project": p["project"], "cost": None, "links": [p["tracker_ref"]],
+                                "evidence": p["evidence"]})
+        notes = {p.stem for p in self.digest_files()}
+        for job_id, m in self._manifests():
+            stamp = m.finished_at or m.started_at or ""
+            if not stamp:
+                continue
+            if DIGEST_ID.match(job_id) and m.status in ("complete", "written"):
+                entries.append({"kind": "digest", "stamp": stamp, "ref": job_id, "title": "Morning digest",
+                                "project": "", "cost": m.cost_usd, "links": [],
+                                "evidence": [f"/digest/{job_id}"] if job_id in notes else []})
+            elif job_id.startswith("consolidate-") and m.status == "written":
+                note = m.paths.get("note", "")
+                entries.append({"kind": "consolidation", "stamp": stamp, "ref": job_id, "title": "Consolidation note",
+                                "project": "", "cost": m.cost_usd, "links": [],
+                                "evidence": [note.rsplit("/", 1)[-1]] if note else []})
+        tz = self.now().tzinfo
+        for e in entries:  # one offset for every kind, so string order is time order and months are local months
+            try:
+                e["stamp"] = parse_iso(str(e["stamp"])).astimezone(tz).isoformat(timespec="seconds")
+            except ValueError:
+                e["stamp"] = ""
+        entries = [e for e in entries if e["stamp"]]
+        entries.sort(key=lambda e: (e["stamp"], e["ref"]), reverse=True)
+        months: dict[str, dict[str, Any]] = {}
+        for e in entries:
+            row = months.setdefault(str(e["stamp"])[:7], {"count": 0, "cost": 0.0, "proposals": 0, "digests": 0,
+                                                          "notes": 0})
+            row["count"] += 1
+            row["cost"] = round(row["cost"] + (e["cost"] or 0.0), 6)
+            row[{"proposal": "proposals", "digest": "digests", "consolidation": "notes"}[e["kind"]]] += 1
+        rollup = [{"month": k, **v} for k, v in sorted(months.items(), reverse=True)]
+        return {"entries": entries, "rollup": rollup}
 
     # --- status --------------------------------------------------------------------------------
 

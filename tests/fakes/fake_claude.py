@@ -20,6 +20,13 @@ Environment (set by the test runner, which is why they are not in the client's a
   FAKE_CLAUDE_CANDIDATES for the consolidation prompt (system prompt mentions "memory candidates"):
                          ok (default, 2 candidates) | many (12) | ungrounded (1 good, 1 invented
                          evidence) | none (empty list)
+  FAKE_CLAUDE_PROPOSALS  for the proposals prompt (system prompt mentions "task proposals"):
+                         ok (default, 2 proposals) | many (12) | none ([]) | outside (1 good, 1 whose
+                         evidence id was never sent) | mixed (one proposal citing a sent id and an
+                         unsent one) | dupes (same title twice, different spelling) | invalid_json |
+                         not_a_list (an object) | held_guess (cites the id t-term) | one_bad (1 good, 1 with an unknown key) | echo_rejected
+                         (cites a rejected-example id as evidence) | canary (title carries the term
+                         in FAKE_CLAUDE_TERM)
 """
 from __future__ import annotations
 
@@ -110,8 +117,49 @@ def _candidates_result(stdin_text: str) -> dict:
     return {"candidates": [_candidate("First idea", refs[:2]), _candidate("Second idea", refs[-1:])]}
 
 
+def _proposal(title: str, evidence: list[str], **over: object) -> dict:
+    return {"title": title, "project": "synthetic-project", "kind": "task", "evidence": evidence,
+            "suggested_status": "to do", "due_hint": None, "rationale": f"Synthetic reason for {title}.", **over}
+
+
+def _proposals_result(stdin_text: str) -> object:
+    all_ids = _ids(stdin_text)
+    ids = [i for i in all_ids if not i.startswith("rejected-")]
+    mode = os.environ.get("FAKE_CLAUDE_PROPOSALS", "ok")
+    if mode == "invalid_json":
+        return "this is not json ["
+    if mode == "not_a_list":
+        return {"proposals": []}
+    if mode == "none" or not ids:
+        return []
+    if mode == "many":
+        return [_proposal(f"Synthetic work {n}", ids[:1]) for n in range(12)]
+    if mode == "outside":
+        return [_proposal("Grounded work", ids[:1]), _proposal("Invented work", ["made-up-id"])]
+    if mode == "mixed":
+        return [_proposal("Half grounded work", [ids[0], "made-up-id"])]
+    if mode == "dupes":
+        return [_proposal("Fix the build", ids[:1]), _proposal("fix  the BUILD!", ids[:1])]
+    if mode == "one_bad":
+        return [_proposal("Good work", ids[:1]), {**_proposal("Bad work", ids[:1]), "owner": "someone"}]
+    if mode == "echo_rejected":
+        rejected = [i for i in all_ids if i.startswith("rejected-")]
+        return [_proposal("Cites a rejected example", rejected[:1] or ["rejected-none"])]
+    if mode == "held_guess":
+        return [_proposal("Guess at a held item", ["t-term"])]
+    if mode == "canary":
+        return [_proposal(f"Leak {os.environ.get('FAKE_CLAUDE_TERM', 'x')} now", ids[:1])]
+    return [_proposal("Reply to the open thread", ids[:1]),
+            _proposal("Plan the follow up", ids[-1:], kind="followup", due_hint="2026-10-09")]
+
+
 def _envelope(stdin_text: str, **over: object) -> dict:
     env = json.loads(FIXTURE.read_text(encoding="utf-8"))
+    if "task proposals" in _system_prompt():
+        result = _proposals_result(stdin_text)
+        env["result"] = result if isinstance(result, str) else json.dumps(result)
+        env.update(over)
+        return env
     if "memory candidates" in _system_prompt():
         env["result"] = json.dumps(_candidates_result(stdin_text))
         env.update(over)

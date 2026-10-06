@@ -68,3 +68,28 @@ adapter = "toast"
 # ntfy_token_env = "JARVIS_NTFY_TOKEN"
 # ntfy_priority = 3
 # ntfy_click_template = "obsidian://open?vault={vault}&file={path}"
+
+# --- work hub, Projects view ------------------------------------------------------------
+# Show the active task under a repo when its line contains one of the keywords (synthetic values).
+[hub.task_projects]
+example-repo = ["example keyword"]
+
+# --- plan Q2 ------------------------------------------------------------------------------
+# Tracker adapters (jarvisd/tracker.py). "markdown" is the default and needs nothing. For
+# ClickUp, set adapter = "clickup", export the token in the environment variable named below
+# (the token itself never goes in a file) and map projects to list ids. All values here are
+# synthetic. `jarvis tracker check` reports readiness and sends nothing.
+[tracker]
+adapter = "markdown"
+# adapter = "clickup"
+clickup_token_env = "JARVIS_CLICKUP_TOKEN"
+
+[tracker.clickup]
+default_list_id = "901999"
+# status = "to do"
+# dry_run = true                  # log the exact request, send nothing
+timeout_s = 15.0
+
+[tracker.clickup.lists]
+example-api = "901100"
+example-notes = "901200"
