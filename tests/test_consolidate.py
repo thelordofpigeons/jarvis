@@ -829,7 +829,7 @@ def test_the_candidates_line_renders_in_the_note_under_the_system_heading(tmp_cf
     ctx = render.DigestContext(job_id="digest-x", day=now.date(), generated_at=now, window_start=now - timedelta(hours=30),
                                window_end=now, results={"system": res})
     body = "\n".join(render.SECTIONS["system"].render(ctx))
-    assert body.startswith("## What JARVIS did while you slept") and "memory candidates" in body
+    assert body.startswith("## System") and "memory candidates" in body
 
 
 # --- configuration -------------------------------------------------------------------------------

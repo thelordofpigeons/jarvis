@@ -11,6 +11,12 @@ so a format change shows up in one place.
 Held references are shown by id, kind and reason. `source_ref` (a path) is dropped here, so no
 view can print it: that stays terminal-only (`jarvis held`, design D5).
 
+One model per request: each route calls one method that returns everything its view needs
+(`today`, `projects_page`, `activity`, `status`), and the views never call back in here. Folders
+that are read on every request (held, proposals, manifests, the newest queue files, the digest
+notes) are parsed once per directory signature (name, size, mtime_ns of each file), the way the
+audit log already is, so `/api/status`, which the face polls every 5 s, reads almost nothing warm.
+
 Layer L3 (hub). Imports the layers below it; nothing outside the hub imports this module.
 """
 from __future__ import annotations
@@ -20,7 +26,7 @@ import math
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -34,6 +40,7 @@ from jarvisd.audit import AuditLog
 from jarvisd.cli import _digest_files, _raw_dir, _status_lines
 from jarvisd.common import iso, local_now, parse_iso
 from jarvisd.config import Config
+from jarvisd.hub.digestparse import FAILING_CI_TOKENS, parse_note, repo_rows
 from jarvisd.hub.mdhtml import section, split_front_matter
 from jarvisd.jobstore import JOB_STATES, STATES, _pid_alive
 from jarvisd.models import Job, RunManifest
@@ -47,59 +54,16 @@ _AUDIT_PLUMBING = {"ts", "event", "seq", "prev", "h", "run_id", "pid", "ver"}
 _ZERO_BREAKER = {"state": "closed", "reason": "", "opened_at": None, "until": None,
                  "consecutive_failures": 0, "requires_human_reset": False, "probe_at": None}
 
-_REPO_LINE = re.compile(
-    r"^- (?P<name>\S+?)(?: \((?P<tag>[^)]+)\))?:? (?:branch (?P<branch>.+?), )?"
-    r"(?P<commits>\d+) commits? since window, (?P<modified>\d+) modified, (?P<untracked>\d+) untracked"
-    r"(?P<rest>.*)$")
-_ITEM_ID = re.compile(r"\[([0-9a-f]{8})\]")
-
-
 # Projects view: how much digest history is read, and the fixed risk threshold for uncommitted work.
 _HISTORY_DIGESTS = 60
 DIRTY_RISK_DAYS = 2
-_FAILING_CI_TOKENS = frozenset({"failure", "timed_out", "startup_failure", "action_required"})
-_GH_LINE = re.compile(r"^- GitHub (?P<name>\S+?)(?: \(work\))?: (?P<rest>.*)$")
-_GH_QUIET = re.compile(r"(?P<name>[^\s,()]+) \((?P<bits>[^)]*)\)")
-_PRS = re.compile(r"^(\d+) open PRs?\b")
-_COMMA_OUTSIDE_PARENS = re.compile(r",\s*(?![^()]*\))")
-
-
-def _ci_token(parts: list[str]) -> str:
-    for part in parts:
-        part = part.strip()
-        if part == "no CI runs":
-            return "none"
-        if part.startswith("CI "):
-            return re.sub(r"[^a-z0-9_]+", "_", part[3:].split(" on ")[0].lower()).strip("_") or "unknown"
-    return ""
-
-
-def _parse_repo_lines(lines: list[str]) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """(git facts by repo name, github facts by repo name) from the digest Repos section. A repo named in the
-    Quiet line has zero counts; one that is in neither is simply absent, so nothing is invented for it."""
-    git: dict[str, dict[str, Any]] = {}
-    gh: dict[str, dict[str, Any]] = {}
-    for line in lines:
-        text = line.strip()
-        if text.startswith("- Quiet:"):
-            for name in text[len("- Quiet:"):].rstrip(". ").split(","):
-                if name.strip():
-                    git.setdefault(name.strip(), {"branch": "", "commits": 0, "modified": 0, "untracked": 0})
-        elif text.startswith("- GitHub quiet:"):
-            for m in _GH_QUIET.finditer(text[len("- GitHub quiet:"):]):
-                gh[m.group("name")] = {"prs": 0, "ci": _ci_token(m.group("bits").split(","))}
-        elif text.startswith("- GitHub "):
-            m = _GH_LINE.match(_ITEM_ID.sub("", text).strip())
-            if m:
-                parts = _COMMA_OUTSIDE_PARENS.split(m.group("rest").split(": ", 1)[0])
-                prs = _PRS.match(parts[0].strip())
-                gh[m.group("name")] = {"prs": int(prs.group(1)) if prs else 0, "ci": _ci_token(parts[1:])}
-        else:
-            m = _REPO_LINE.match(text)
-            if m:
-                git[m.group("name")] = {"branch": m.group("branch") or "", "commits": int(m.group("commits")),
-                                        "modified": int(m.group("modified")), "untracked": int(m.group("untracked"))}
-    return git, gh
+_FAILING_CI_TOKENS = FAILING_CI_TOKENS
+# Today: how many waiting proposals get an inline Confirm. Activity: the width of its strip.
+WAITING_SHOWN = 3
+STRIP_DAYS = 7
+NEWEST_JOBS = 3
+_REPO_LINE = re.compile(r"^- (?P<name>\S+?)(?: \((?P<tag>[^)]+)\))?:? (?:branch (?P<branch>.+?), )?"
+                        r"(?P<commits>\d+) commits? since window")
 
 
 def _read_json(path: Path) -> Any | None:
@@ -125,15 +89,48 @@ def _json_files(folder: Path) -> list[Path]:
         return []
 
 
+def _signature(paths: Iterable[Path]) -> tuple[tuple[str, int, int], ...]:
+    """(name, size, mtime_ns) per file: what a folder looks like without reading it."""
+    out = []
+    for path in paths:
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        out.append((path.name, st.st_size, st.st_mtime_ns))
+    return tuple(out)
+
+
+def _job_of(path: Path) -> Job | None:
+    raw = _read_json(path)
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return Job.model_validate(raw)
+    except ValidationError:
+        return None
+
+
+def _job_stamp(job: Job) -> str:
+    return job.history[-1].ts if job.history else job.created_at
+
+
 @dataclass
 class AuditSnapshot:
-    """The audit log as it was at one file signature: parsed once, verified once."""
+    """The audit log as it was at one file signature: parsed once, verified once, indexed by seq once."""
 
     signature: tuple[Any, ...]
     records: list[dict[str, Any]]
     verified: bool
     broken_at: int | None
     files: int
+    index: dict[int, dict[str, Any]] = field(default_factory=dict, repr=False)
+
+    def __post_init__(self) -> None:
+        for rec in self.records:
+            seq = rec.get("seq")
+            if isinstance(seq, int):
+                self.index[seq] = rec
 
     @property
     def head(self) -> tuple[int, str]:
@@ -148,6 +145,7 @@ class HubData:
     cfg: Config
     clock: Callable[[], datetime] | None = None
     _audit_cache: AuditSnapshot | None = field(default=None, init=False, repr=False)
+    _dir_cache: dict[str, tuple[tuple[Any, ...], Any]] = field(default_factory=dict, init=False, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
     # --- small helpers ---------------------------------------------------------------------
@@ -169,6 +167,18 @@ class HubData:
             return None
         return StateStore.from_config(self.cfg, clock=self.clock)
 
+    def _cached(self, key: str, paths: list[Path], build: Callable[[list[Path]], Any]) -> Any:
+        """`build(paths)` once per folder signature; the same value until a file is added, removed or changed."""
+        sig = _signature(paths)
+        with self._lock:
+            hit = self._dir_cache.get(key)
+            if hit is not None and hit[0] == sig:
+                return hit[1]
+        value = build(paths)
+        with self._lock:
+            self._dir_cache[key] = (sig, value)
+        return value
+
     # --- audit ---------------------------------------------------------------------------------
 
     def _audit_log(self) -> AuditLog | None:
@@ -182,14 +192,7 @@ class HubData:
         """Parsed and verified audit log, recomputed only when a file's size or mtime moved."""
         log = self._audit_log()
         files = log.all_files() if log is not None else []
-        signature: list[Any] = []
-        for path in files:
-            try:
-                st = path.stat()
-            except OSError:
-                continue
-            signature.append((path.name, st.st_size, st.st_mtime_ns))
-        sig = tuple(signature)
+        sig = _signature(files)
         with self._lock:
             cached = self._audit_cache
             if cached is not None and cached.signature == sig:
@@ -236,10 +239,10 @@ class HubData:
         """What the audit log says about a run's recorded seq: the record's hash, or that it is gone."""
         if seq is None:
             return {"seq": None, "found": False, "hash": ""}
-        for rec in self.audit().records:
-            if rec.get("seq") == seq:
-                return {"seq": seq, "found": True, "hash": str(rec.get("h", ""))[:12]}
-        return {"seq": seq, "found": False, "hash": ""}
+        rec = self.audit().index.get(seq)
+        if rec is None:
+            return {"seq": seq, "found": False, "hash": ""}
+        return {"seq": seq, "found": True, "hash": str(rec.get("h", ""))[:12]}
 
     # --- queue ---------------------------------------------------------------------------------
 
@@ -250,32 +253,48 @@ class HubData:
         """Readable jobs of one state, oldest first. A corrupt file is skipped, not moved."""
         if state not in JOB_STATES:
             raise ValueError(f"not a job state: {state!r}")
-        found: list[Job] = []
-        for path in _json_files(self.queue_dir / state):
-            raw = _read_json(path)
-            if not isinstance(raw, dict):
-                continue
-            try:
-                found.append(Job.model_validate(raw))
-            except ValidationError:
-                continue
-        return sorted(found, key=lambda j: (j.created_at, j.id))
+
+        def build(paths: list[Path]) -> list[Job]:
+            found = [j for j in (_job_of(p) for p in paths) if j is not None]
+            return sorted(found, key=lambda j: (j.created_at, j.id))
+
+        return self._cached(f"jobs:{state}", _json_files(self.queue_dir / state), build)
+
+    def newest_jobs(self, state: str) -> list[Job]:
+        """The jobs behind the NEWEST_JOBS most recently modified files of one state, newest first. The cost does
+        not grow with the age of the queue, and the result is cached by the folder's signature."""
+        folder = self.queue_dir / state
+        try:
+            files = sorted(_json_files(folder), key=lambda p: p.stat().st_mtime, reverse=True)[:NEWEST_JOBS]
+        except OSError:
+            files = []
+
+        def build(paths: list[Path]) -> list[Job]:
+            found = [j for j in (_job_of(p) for p in paths) if j is not None]
+            return sorted(found, key=_job_stamp, reverse=True)
+
+        return self._cached(f"newest:{state}", files, build)
 
     def held(self, day: str | None = None) -> list[dict[str, Any]]:
         """Held references without their source path. `day` keeps those recorded for that date."""
-        out: list[dict[str, Any]] = []
-        for path in _json_files(self.queue_dir / "held"):
-            raw = _read_json(path)
-            if not isinstance(raw, dict):
-                continue
-            ids = [str(d) for d in raw.get("digest_ids", []) if isinstance(d, str)]
-            if day is not None and not any(d == f"digest-{day}" or d.startswith(f"digest-{day}-") for d in ids):
-                continue
-            out.append({"id": str(raw.get("id", path.stem)), "kind": str(raw.get("kind", "")),
-                        "reason": str(raw.get("reason", "")), "first_seen": raw.get("first_seen"),
-                        "last_seen": raw.get("last_seen"), "expires_at": raw.get("expires_at"),
-                        "digest_ids": ids})
-        return sorted(out, key=lambda r: (str(r["last_seen"] or ""), r["id"]), reverse=True)
+
+        def build(paths: list[Path]) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for path in paths:
+                raw = _read_json(path)
+                if not isinstance(raw, dict):
+                    continue
+                ids = [str(d) for d in raw.get("digest_ids", []) if isinstance(d, str)]
+                out.append({"id": str(raw.get("id", path.stem)), "kind": str(raw.get("kind", "")),
+                            "reason": str(raw.get("reason", "")), "first_seen": raw.get("first_seen"),
+                            "last_seen": raw.get("last_seen"), "expires_at": raw.get("expires_at"),
+                            "digest_ids": ids})
+            return sorted(out, key=lambda r: (str(r["last_seen"] or ""), r["id"]), reverse=True)
+
+        refs: list[dict[str, Any]] = self._cached("held", _json_files(self.queue_dir / "held"), build)
+        if day is None:
+            return list(refs)
+        return [r for r in refs if any(d == f"digest-{day}" or d.startswith(f"digest-{day}-") for d in r["digest_ids"])]
 
     # --- digests -------------------------------------------------------------------------------
 
@@ -313,41 +332,98 @@ class HubData:
         digest = self.latest_digest()
         if digest is None:
             return {"digest": None, "rows": [], "other": []}
-        rows: list[dict[str, str]] = []
-        other: list[str] = []
-        for line in section(digest["body"], "Repos"):
-            if not line.strip():
-                continue
-            m = _REPO_LINE.match(line)
-            if not m:
-                other.append(line.lstrip("- ").strip())
-                continue
-            rest = m.group("rest")
-            ident = _ITEM_ID.search(rest)
-            note = _ITEM_ID.sub("", rest).strip().lstrip(",:; ").strip()
-            rows.append({"name": m.group("name"), "tag": m.group("tag") or "", "branch": m.group("branch") or "",
-                         "commits": m.group("commits"), "modified": m.group("modified"),
-                         "untracked": m.group("untracked"), "id": ident.group(1) if ident else "", "note": note})
+        lines = [ln for ln in section(digest["body"], "Repos") if ln.strip()]
+        other = [ln.lstrip("- ").strip() for ln in lines if not _REPO_LINE.match(ln.strip())]
         return {"digest": {"job_id": digest["job_id"], "date": digest["meta"].get("date", ""),
-                           "generated_at": digest["meta"].get("generated_at", "")}, "rows": rows, "other": other}
+                           "generated_at": digest["meta"].get("generated_at", "")},
+                "rows": repo_rows(lines), "other": other}
+
+    def _digest_history(self) -> list[dict[str, Any]]:
+        """Parsed facts of the newest digest notes, oldest first, one per day: repos, GitHub, the active task, the
+        number of decisions and the held count. Cached by the digest folder's signature."""
+        files = self.digest_files()[-_HISTORY_DIGESTS:]
+
+        def build(paths: list[Path]) -> list[dict[str, Any]]:
+            by_day: dict[date, dict[str, Any]] = {}
+            for path in paths:
+                note = self.read_digest(path)
+                m = re.match(r"^digest-(\d{4}-\d{2}-\d{2})", note["job_id"]) if note else None
+                if note is None or m is None:
+                    continue
+                parsed = parse_note(note["body"], note["meta"])
+                repos = parsed["repos"]
+                day = date.fromisoformat(m.group(1))
+                # Files come oldest first and a forced rerun sorts after its original, so the later note wins.
+                by_day[day] = {"date": day, "job_id": note["job_id"], "grammar": parsed["grammar"],
+                               "repos": repos["git"], "github": repos["github"], "quiet_n": repos["quiet_n"],
+                               "task": " ".join(" ".join(section(note["body"], "Active task")).split()),
+                               "decided": len(parsed["decided"]), "held": parsed["counts"]["held"]}
+            return [by_day[d] for d in sorted(by_day)]
+
+        return self._cached("history", files, build)
+
+    @staticmethod
+    def delta(latest: dict[str, Any] | None, previous: dict[str, Any] | None) -> dict[str, Any]:
+        """What moved between the latest note and the newest note of an earlier date: repo lines keyed by repo,
+        then the count lines. Empty lists mean nothing changed. Without an earlier note only the facts that are
+        changes by definition (commits since the window, decisions in the window) are reported."""
+        repos: dict[str, list[str]] = {}
+        lines: list[str] = []
+        if latest is None:
+            return {"repos": repos, "lines": lines}
+        prev_repos = previous["repos"] if previous else {}
+        prev_gh = previous["github"] if previous else {}
+        for name, facts in latest["repos"].items():
+            was = prev_repos.get(name, {"commits": 0, "modified": 0, "untracked": 0})
+            out: list[str] = []
+            if facts["commits"]:
+                out.append(f"{facts['commits']} commit{'' if facts['commits'] == 1 else 's'}")
+            dirty, dirty_was = (facts["modified"], facts["untracked"]), (was["modified"], was["untracked"])
+            if previous is not None and dirty != dirty_was and any(dirty):
+                out.append(f"uncommitted {dirty[0]}/{dirty[1]}, was {dirty_was[0]}/{dirty_was[1]}")
+            if out:
+                repos[name] = out
+        for name, gh in (latest["github"].items() if previous is not None else ()):
+            was = prev_gh.get(name, {"prs": 0, "ci": ""})
+            failing, failing_was = gh.get("ci") in FAILING_CI_TOKENS, was.get("ci") in FAILING_CI_TOKENS
+            if failing != failing_was:
+                repos.setdefault(name, []).append("CI now failing" if failing else "CI now green")
+            if gh.get("prs", 0) != was.get("prs", 0):
+                repos.setdefault(name, []).append(f"{gh.get('prs', 0)} open PRs, was {was.get('prs', 0)}")
+        if latest.get("decided"):
+            lines.append(f"{latest['decided']} decision{'' if latest['decided'] == 1 else 's'} recorded")
+        held_was = previous["held"] if previous else None
+        if held_was is not None and latest.get("held") != held_was:
+            lines.append(f"held {latest['held']}, was {held_was}")
+        return {"repos": repos, "lines": lines}
 
     # --- runs ----------------------------------------------------------------------------------
 
-    def runs(self) -> list[dict[str, Any]]:
-        """The digest ledger, newest first: run manifests joined with their queue job."""
-        rows: dict[str, dict[str, Any]] = {}
+    def _manifests(self) -> list[tuple[str, RunManifest]]:
         try:
-            manifest_paths = sorted((self.state_dir / "runs").glob("*/run.json"))
+            paths = sorted((self.state_dir / "runs").glob("*/run.json"))
         except OSError:
-            manifest_paths = []
-        for path in manifest_paths:
-            raw = _read_json(path)
-            if not isinstance(raw, dict):
-                continue
-            try:
-                m = RunManifest.model_validate(raw)
-            except ValidationError:
-                continue
+            return []
+
+        def build(found: list[Path]) -> list[tuple[str, RunManifest]]:
+            out: list[tuple[str, RunManifest]] = []
+            for path in found:
+                raw = _read_json(path)
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    out.append((path.parent.name, RunManifest.model_validate(raw)))
+                except ValidationError:
+                    continue
+            return out
+
+        return self._cached("manifests", paths, build)
+
+    def runs(self) -> list[dict[str, Any]]:
+        """The digest ledger, newest first: run manifests joined with their queue job. Linear: the witness is a
+        lookup in the snapshot's seq index, and each queue state is parsed once."""
+        rows: dict[str, dict[str, Any]] = {}
+        for _, m in self._manifests():
             rows[m.job_id] = {
                 "job_id": m.job_id, "status": m.status, "stamp": m.finished_at or m.started_at or "",
                 "counts": m.counts, "cost_usd": m.cost_usd, "audit_seq": m.audit_seq,
@@ -359,7 +435,7 @@ class HubData:
                 result = job.result or {}
                 rows[job.id] = {
                     "job_id": job.id, "status": str(result.get("status") or job.state),
-                    "stamp": job.history[-1].ts if job.history else job.created_at, "counts": {},
+                    "stamp": _job_stamp(job), "counts": {},
                     "cost_usd": result.get("cost_usd", job.cost_usd), "audit_seq": None,
                 }
         notes = {p.stem for p in self.digest_files()}
@@ -372,28 +448,35 @@ class HubData:
             out.append(row)
         return sorted(out, key=lambda r: (r["stamp"], r["job_id"]), reverse=True)
 
-    # --- projects and ledger ---------------------------------------------------------------------
+    # --- proposals, projects and ledger -----------------------------------------------------------
 
     def proposals(self) -> list[dict[str, Any]]:
         """state/proposals/*.json as plain dicts, defensively: a missing folder is zero proposals, a file that is
         not a JSON object is skipped. `decided_at` is the file mtime (the proposal has no decision stamp)."""
-        out: list[dict[str, Any]] = []
-        for path in _json_files(self.state_dir / "proposals"):
-            raw = _read_json(path)
-            if not isinstance(raw, dict):
-                continue
-            try:
-                decided = iso(datetime.fromtimestamp(path.stat().st_mtime, tz=self.now().tzinfo))
-            except OSError:
-                continue
-            evidence = raw.get("evidence")
-            ref = raw.get("tracker_ref")
-            out.append({"id": str(raw.get("id") or path.stem), "title": str(raw.get("title") or ""),
-                        "project": str(raw.get("project") or ""), "status": str(raw.get("status") or ""),
-                        "tracker_ref": ref if isinstance(ref, str) and ref else None,
-                        "evidence": [str(e) for e in evidence] if isinstance(evidence, list) else [],
-                        "decided_at": decided})
-        return out
+        tz = self.now().tzinfo
+
+        def build(paths: list[Path]) -> list[dict[str, Any]]:
+            out: list[dict[str, Any]] = []
+            for path in paths:
+                raw = _read_json(path)
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    decided = iso(datetime.fromtimestamp(path.stat().st_mtime, tz=tz))
+                except OSError:
+                    continue
+                evidence = raw.get("evidence")
+                ref = raw.get("tracker_ref")
+                edits = raw.get("edits")
+                out.append({"id": str(raw.get("id") or path.stem), "title": str(raw.get("title") or ""),
+                            "project": str(raw.get("project") or ""), "status": str(raw.get("status") or ""),
+                            "tracker_ref": ref if isinstance(ref, str) and ref else None,
+                            "evidence": [str(e) for e in evidence] if isinstance(evidence, list) else [],
+                            "decided_at": decided, "created_at": str(raw.get("created_at") or ""),
+                            "due": (edits.get("due") if isinstance(edits, dict) else None) or raw.get("due_hint")})
+            return out
+
+        return self._cached("proposals", _json_files(self.state_dir / "proposals"), build)
 
     def reminders(self) -> list[dict[str, Any]]:
         """Due dates of accepted and still-open proposals, soonest first. Rejected proposals and ones with no
@@ -401,51 +484,37 @@ class HubData:
         dates reach the hub only through the digest, so this is the part that is known locally."""
         today = self.now().date()
         out: list[dict[str, Any]] = []
-        for path in _json_files(self.state_dir / "proposals"):
-            raw = _read_json(path)
-            if not isinstance(raw, dict) or raw.get("status") not in ("proposed", "confirmed", "edited_confirmed"):
+        for p in self.proposals():
+            if p["status"] not in ("proposed", "confirmed", "edited_confirmed"):
                 continue
-            edits = raw.get("edits")
-            text = (edits.get("due") if isinstance(edits, dict) else None) or raw.get("due_hint")
             try:
-                due = date.fromisoformat(str(text))
+                due = date.fromisoformat(str(p["due"]))
             except ValueError:
                 continue
             days = (due - today).days
-            ref = raw.get("tracker_ref")
-            out.append({"id": str(raw.get("id") or path.stem), "title": str(raw.get("title") or ""),
-                        "project": str(raw.get("project") or ""), "status": str(raw["status"]),
-                        "accepted": raw["status"] != "proposed", "due": due.isoformat(), "days": days,
+            out.append({"id": p["id"], "title": p["title"], "project": p["project"], "status": p["status"],
+                        "accepted": p["status"] != "proposed", "due": due.isoformat(), "days": days,
                         "bucket": "overdue" if days < 0 else "today" if days == 0 else "soon" if days <= 7 else "later",
-                        "tracker_ref": ref if isinstance(ref, str) and ref else None})
+                        "tracker_ref": p["tracker_ref"]})
         return sorted(out, key=lambda r: (r["due"], r["id"]))
-
-    def _digest_history(self) -> list[dict[str, Any]]:
-        """Parsed Repos and Active task sections of the newest digest notes, oldest first, one per day."""
-        by_day: dict[date, dict[str, Any]] = {}
-        for path in self.digest_files()[-_HISTORY_DIGESTS:]:
-            note = self.read_digest(path)
-            m = re.match(r"^digest-(\d{4}-\d{2}-\d{2})", note["job_id"]) if note else None
-            if note is None or m is None:
-                continue
-            repos, github = _parse_repo_lines(section(note["body"], "Repos"))
-            day = date.fromisoformat(m.group(1))
-            # Files come oldest first and a forced rerun sorts after its original, so the later note wins.
-            by_day[day] = {"date": day, "repos": repos, "github": github,
-                           "task": " ".join(" ".join(section(note["body"], "Active task")).split())}
-        return [by_day[d] for d in sorted(by_day)]
 
     def projects(self) -> list[dict[str, Any]]:
         """One row per [digest].repos entry, in config order, derived only from the digest notes, the proposals
-        folder and the config: the hub runs no git and no model. Risks are fixed rules (docs/hub.md)."""
+        folder and the config: the hub runs no git and no model. Risks are fixed rules (docs/hub.md). A repo in
+        `[hub].always_dirty` never gets the uncommitted-work risk, and dirty counts alone do not make it active."""
         history = self._digest_history()
         today = self.now().date()
         proposals = self.proposals()
         latest = history[-1] if history else None
+        previous = next((h for h in reversed(history[:-1]) if latest and h["date"] < latest["date"]), None)
+        moved = self.delta(latest, previous)["repos"]
+        exempt = {name.lower() for name in self.cfg.hub.always_dirty}
         rows: list[dict[str, Any]] = []
         for repo in self.cfg.digest.repos:
             name = repo.name
             facts = latest["repos"].get(name) if latest else None
+            if facts is None and latest and latest.get("quiet_n") is not None:
+                facts = {"branch": "", "commits": 0, "modified": 0, "untracked": 0}  # grammar 2: unnamed means quiet
             gh = latest["github"].get(name, {}) if latest else {}
             # Activity is a commit or any uncommitted change in a digest: the notes carry no commit dates.
             active: date | None = None
@@ -473,16 +542,19 @@ class HubData:
             keywords = [k.lower() for k in self.cfg.hub.task_projects.get(name, []) if k]
             task = latest["task"] if latest else ""
             task_line = task if (task and any(k in task.lower() for k in keywords)) else ""
+            always_dirty = name.lower() in exempt
             risks: list[str] = []
             if stale:
-                risks.append(f"stale repo, no activity in the {days_since} days of digests on file" if idle_floor
-                             else f"stale repo, no activity for {days_since} days")
-            if dirty_days is not None and dirty_days >= DIRTY_RISK_DAYS:
+                # The plus sign is the idle floor: no activity in any digest on file, so at least that long.
+                risks.append(f"stale repo, idle {days_since}+ days" if idle_floor else f"stale repo, idle {days_since} days")
+            if dirty_days is not None and dirty_days >= DIRTY_RISK_DAYS and not always_dirty:
                 risks.append(f"uncommitted work for {dirty_days} days")
             if gh.get("ci") in _FAILING_CI_TOKENS:
                 risks.append("CI failing")
             if "(OVERDUE)" in task_line:
                 risks.append("active task overdue")
+            dirty = bool(facts and (facts["modified"] or facts["untracked"]))
+            is_active = bool(facts and facts["commits"]) or bool(gh.get("prs")) or bool(risks) or (dirty and not always_dirty)
             rows.append({
                 "name": name, "work": repo.work, "known": known,
                 "branch": facts["branch"] if facts else "",
@@ -491,26 +563,17 @@ class HubData:
                 "untracked": facts["untracked"] if facts else 0,
                 "prs": gh.get("prs"), "ci": gh.get("ci", ""),
                 "days_since": days_since, "idle_floor": idle_floor, "dirty_days": dirty_days, "stale": stale,
-                "task": task_line, "risks": risks,
+                "task": task_line, "risks": risks, "always_dirty": always_dirty, "active": is_active,
+                "delta": moved.get(name, []),
                 "open_proposals": sum(1 for p in proposals if p["project"] == name and p["status"] == "proposed"),
             })
         return rows
 
-    def _manifests(self) -> list[tuple[str, RunManifest]]:
-        found: list[tuple[str, RunManifest]] = []
-        try:
-            paths = sorted((self.state_dir / "runs").glob("*/run.json"))
-        except OSError:
-            return found
-        for path in paths:
-            raw = _read_json(path)
-            if not isinstance(raw, dict):
-                continue
-            try:
-                found.append((path.parent.name, RunManifest.model_validate(raw)))
-            except ValidationError:
-                continue
-        return found
+    def projects_page(self) -> dict[str, Any]:
+        """Everything the Projects view needs: the rows split Active first, and the old Repos table."""
+        rows = self.projects()
+        return {"rows": rows, "active": [r for r in rows if r["active"]], "quiet": [r for r in rows if not r["active"]],
+                "raw": self.repos(), "stale_days": self.cfg.hub.stale_days}
 
     def ledger(self) -> dict[str, Any]:
         """Everything delivered, newest first, plus a rollup per month. Delivered means a confirmed proposal with a
@@ -584,11 +647,13 @@ class HubData:
                 "pause": state.pause_info() if (state and state.paused()) else None}
 
     def _last_digest(self, now: datetime) -> dict[str, Any] | None:
+        """The newest finished digest among the NEWEST_JOBS most recently modified files of queue/done (the
+        face_signal rule), never the whole folder."""
         best: tuple[str, Job] | None = None
-        for job in self.jobs("done"):
+        for job in self.newest_jobs("done"):
             if job.kind != DIGEST_KIND or not job.result or job.result.get("status") == "noop":
                 continue
-            stamp = job.history[-1].ts if job.history else job.created_at
+            stamp = _job_stamp(job)
             if best is None or stamp > best[0]:
                 best = (stamp, job)
         if best is None:
@@ -597,7 +662,7 @@ class HubData:
         result = job.result or {}
         return {"job_id": job.id, "path": result.get("note_path"), "status": result.get("status"),
                 "cost_usd": result.get("cost_usd", 0.0),
-                "age_hours": round((now - parse_iso(stamp)).total_seconds() / 3600, 1)}
+                "age_hours": round((now - parse_iso(stamp)).total_seconds() / 3600, 1), "at": stamp}
 
     def daemon_alive(self, beat: dict[str, Any] | None, now: datetime) -> tuple[bool, float | None]:
         """Running means a fresh heartbeat from a live pid. The CLI probes the single-instance
@@ -616,7 +681,7 @@ class HubData:
         return fresh and alive, age
 
     def status(self) -> dict[str, Any]:
-        """The same keys as `jarvis status --json`, read without side effects."""
+        """The same keys as `jarvis status --json` (plus `last_digest.at` and `face`), read without side effects."""
         cfg, now = self.cfg, self.now()
         state = self._state()
         beat = state.read_heartbeat() if state else None
@@ -650,35 +715,116 @@ class HubData:
         }
 
     def face_signal(self) -> dict[str, Any]:
-        """What the /face page needs and the CLI status lacks: proposals waiting and the newest finished job.
-
-        Reads the three newest files of queue/done and queue/failed (by modification time), so the cost does not
-        grow with the age of the queue."""
+        """What the /face page needs and the CLI status lacks: proposals waiting and the newest finished job,
+        from the newest files of queue/done and queue/failed only."""
         newest: dict[str, Any] | None = None
         for state in ("done", "failed"):
-            folder = self.queue_dir / state
-            try:
-                files = sorted((p for p in _json_files(folder)), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
-            except OSError:
-                files = []
-            for path in files:
-                raw = _read_json(path)
-                if not isinstance(raw, dict):
-                    continue
-                try:
-                    job = Job.model_validate(raw)
-                except ValidationError:
-                    continue
-                stamp = job.history[-1].ts if job.history else job.created_at
+            for job in self.newest_jobs(state):
+                stamp = _job_stamp(job)
                 if newest is None or stamp > newest["at"]:
                     newest = {"id": job.id, "state": state, "at": stamp}
         pending = sum(1 for p in self.proposals() if p["status"] == "proposed")
         return {"inbox_pending": pending, "last_finished": newest}
 
+    def strip(self, status: dict[str, Any]) -> dict[str, Any]:
+        """The one-line status strip: health word, last digest, next digest, waiting, failed. Built from a
+        status() dict so the header and `/api/status` cannot disagree; the face poll rebuilds the same text."""
+        now = self.now()
+        if status.get("kill"):
+            health = "Kill switch on."
+        elif status.get("pause"):
+            health = "Paused."
+        elif (status.get("breaker") or {}).get("state", "closed") != "closed":
+            health = "Claude calls paused."
+        elif status.get("running"):
+            health = "Running."
+        else:
+            health = "Stopped."
+        last = status.get("last_digest")
+        at = ""
+        if last and last.get("at"):
+            try:
+                at = parse_iso(str(last["at"])).astimezone(now.tzinfo).strftime("%H:%M")
+            except ValueError:
+                at = "?"
+            digest = f"Last digest {at}, failed." if last.get("status") in ("failed", "error") else f"Last digest {at}."
+        else:
+            digest = "No digest yet."
+        nxt = ""
+        if status.get("next_due"):
+            try:
+                due = parse_iso(str(status["next_due"])).astimezone(now.tzinfo)
+                when = "today" if due.date() == now.date() else ("tomorrow" if due.date() == now.date() + timedelta(days=1)
+                                                                  else due.date().isoformat())
+                nxt = f"Next {due.strftime('%H:%M')} {when}."
+            except ValueError:
+                nxt = ""
+        waiting = int((status.get("face") or {}).get("inbox_pending") or 0)
+        failed = int((status.get("queue") or {}).get("failed") or 0)
+        parts = [health, digest] + ([nxt] if nxt else []) + [f"{waiting} waiting.", f"{failed} failed."]
+        # The phone strip is one line: the last digest is named only when it failed or is missing, and "0 failed"
+        # is left out. face.js (`stripText`) builds the same short text.
+        short = ([digest] if digest != f"Last digest {at}." else []) + ([nxt] if nxt else []) + [f"{waiting} waiting."]
+        if failed:
+            short.append(f"{failed} failed.")
+        return {"text": " ".join(parts), "health": health, "waiting": waiting, "failed": failed, "short": " ".join(short)}
+
     @staticmethod
     def status_lines(data: dict[str, Any]) -> list[str]:
         """The exact text `jarvis status` prints (the CLI's own formatter)."""
         return _status_lines(data)
+
+    # --- one model per route -----------------------------------------------------------------------
+
+    def today(self) -> dict[str, Any]:
+        """The Today view: the parsed latest note, the delta against the previous day, the waiting proposals."""
+        note = self.latest_digest()
+        parsed = parse_note(note["body"], note["meta"]) if note else None
+        history = self._digest_history()
+        latest = history[-1] if history else None
+        previous = next((h for h in reversed(history[:-1]) if latest and h["date"] < latest["date"]), None)
+        waiting = sorted((p for p in self.proposals() if p["status"] == "proposed"), key=lambda p: (p["created_at"], p["id"]))
+        return {"note": note, "parsed": parsed, "delta": self.delta(latest, previous),
+                "waiting": waiting[:WAITING_SHOWN], "waiting_count": len(waiting)}
+
+    def activity(self) -> dict[str, Any]:
+        """The Activity view: the 7-day strip, then runs, the ledger, held, the audit and the status lines."""
+        now = self.now()
+        status = self.status()
+        snap = self.audit()
+        since = now - timedelta(days=STRIP_DAYS)
+        runs = self.runs()
+
+        def recent(stamp: object) -> bool:
+            try:
+                return parse_iso(str(stamp)) >= since
+            except ValueError:
+                return False
+
+        week_runs = [r for r in runs if recent(r["stamp"])]
+        proposals = self.proposals()
+        events = {"proposal_confirmed": 0, "proposal_rejected": 0, "correction": 0}
+        for rec in snap.records:
+            ev = rec.get("event")
+            if ev in events and recent(rec.get("ts")):
+                events[ev] += 1
+        tiles = {
+            "runs": len(week_runs),
+            "failed": sum(1 for r in week_runs if r["status"] in ("failed", "error")),
+            "cost_usd": round(sum(float(r["cost_usd"] or 0.0) for r in week_runs), 4),
+            "proposed": sum(1 for p in proposals if recent(p["created_at"])),
+            "confirmed": events["proposal_confirmed"],
+            "rejected": events["proposal_rejected"],
+            "held": status["held_count"],
+            "flagged": events["correction"],
+            "verified": snap.verified if snap.files else None,
+            "next_due": status["next_due"],
+        }
+        limit = self.cfg.hub.audit_rows
+        return {"tiles": tiles, "runs": runs, "ledger": self.ledger(), "held": self.held(), "audit": snap,
+                "audit_rows": self.audit_rows(limit), "audit_limit": limit, "budget": status["budget"],
+                "cost_today": self.cost_on(now.date()), "status": status, "status_lines": self.status_lines(status),
+                "now": now}
 
 
 def _last_cli_version_from(records: list[dict[str, Any]], now: datetime) -> str | None:

@@ -1,14 +1,16 @@
-"""The GitHub block of the Repos section and the github source label (plan P2).
+"""The GitHub block of the Repos section and the github source label (plan P2, grammar 2).
 
-Builds on the hand made contexts in test_render.py. Synthetic names only.
+Builds on the hand made contexts in test_render.py. Synthetic names only. In grammar 2 a repo
+gets its own GitHub line only when it has open PRs or failing CI; the rest fold into two count
+lines (docs/hub-rework-contract.md, section 1.2).
 """
 from __future__ import annotations
 
 import re
 
 from jarvisd.models import CollectResult, Item, WithheldItem
-from jarvisd.render import SECTIONS, render_digest, source_labels
-from test_render import complete_ctx, ctx_for, empty_ctx, result
+from jarvisd.render import ID_TAIL, SECTIONS, render_digest, source_labels
+from test_render import GH_NOT_READ_LINE, GH_QUIET_LINE, START_LINE, complete_ctx, ctx_for, empty_ctx, result
 
 EM, EN = chr(0x2014), chr(0x2013)
 
@@ -47,8 +49,10 @@ def repos_block(text: str) -> list[str]:
 def test_collected_github_replaces_the_fixed_line() -> None:
     res = gh_result(
         [gh_item("9a9a9a01", "example-web", authored=1, review=1, ci="failure", stale=2,
-                 lines=("PR #7 (review requested): fix: synthetic fix", "PR #12 (yours, draft): feat: synthetic"))],
-        {"example-web": "ok", "example-quiet": "ok", "example-api": "no_access", "example-notes": "no_remote"},
+                 lines=("PR #7 (review requested): fix: synthetic fix", "PR #12 (yours, draft): feat: synthetic")),
+         gh_item("9a9a9a02", "example-green", ci="success")],
+        {"example-web": "ok", "example-green": "ok", "example-quiet": "ok", "example-api": "no_access",
+         "example-notes": "no_remote", "example-other": "no_access"},
         quiet=["example-quiet"],
         summary={"example-quiet": {"ci": "success", "stale_branches": 3, "stale_is_floor": False}},
     )
@@ -61,17 +65,22 @@ def test_collected_github_replaces_the_fixed_line() -> None:
     assert "2 open PRs (1 yours, 1 awaiting your review)" in line
     assert "CI failure on main" in line and "2 stale branches" in line
     assert "PR #7 (review requested): fix: synthetic fix; PR #12 (yours, draft): feat: synthetic" in line
-    assert line.endswith("[9a9a9a01]")
-    assert "- GitHub quiet: example-quiet (CI success, 3 stale branches)." in block
-    assert "- GitHub, no access (the active gh account cannot read the remote): example-api." in block
-    assert "- GitHub, no remote configured: example-notes." in block
+    assert line.endswith("[9a9a9a01]") and ID_TAIL.search(line)
+    # A repo with no PRs and green CI is a count, not a line.
+    assert "example-green" not in joined and "example-quiet" not in joined
+    assert "- GitHub quiet: 2 repos, CI green or none." in block and GH_QUIET_LINE.match("- GitHub quiet: 2 repos, CI green or none.")
+    assert "- GitHub not read: 3 repos (no_access 2, no_remote 1)." in block
+    assert GH_NOT_READ_LINE.match("- GitHub not read: 3 repos (no_access 2, no_remote 1).")
+    assert "example-api" not in joined.split("- GitHub not read")[1], "unread repos are counted by state, not named"
+    # The CI failure also reaches Attention with the repo id.
+    attention = text.split("## Attention\n", 1)[1].split("\n## ", 1)[0]
+    assert "- CI failing: example-web on main [9a9a9a01]" in attention
 
 
-def test_every_unreadable_state_has_a_fixed_phrase() -> None:
-    states = {"a": "no_auth", "b": "ambiguous_remote", "c": "gh_missing", "d": "timeout", "e": "unreadable"}
-    block = "\n".join(repos_block(render_digest(with_github(gh_result([], states)))))
-    for needle in ("gh is not signed in", "several remotes", "gh CLI not found", "timed out", "could not be read"):
-        assert needle in block
+def test_every_unreadable_state_is_counted_in_a_fixed_order() -> None:
+    states = {"a": "no_auth", "b": "ambiguous_remote", "c": "gh_missing", "d": "timeout", "e": "unreadable", "f": "timeout"}
+    block = repos_block(render_digest(with_github(gh_result([], states))))
+    assert "- GitHub not read: 6 repos (no_auth 1, ambiguous_remote 1, gh_missing 1, timeout 2, unreadable 1)." in block
 
 
 def test_source_status_and_front_matter_name_github() -> None:
@@ -83,6 +92,7 @@ def test_source_status_and_front_matter_name_github() -> None:
     text = render_digest(ctx)
     assert "github: ok" in text and "github: not_collected" not in text
     assert "github ok (1 of 2 repos read)" in text
+    assert "- GitHub quiet: 1 repo, CI green or none." in repos_block(text)
 
 
 def test_missing_github_result_keeps_the_not_collected_label() -> None:
@@ -118,9 +128,13 @@ def test_sensitive_held_item_is_never_printed_and_policy_held_has_no_oneliner() 
         held=[WithheldItem(id="5ec7e701", kind="github_repo", source_ref="x", reason="term:0"),
               WithheldItem(id="90111c01", kind="github_repo", source_ref="x", reason="work_policy", hold_kind="policy")],
     )
+    assert ctx.summary is not None
+    ctx.summary.summaries["90111c01"] = "a one-liner that must not be glued"
     text = render_digest(ctx)
     assert "hidden synthetic title" not in text and "example-secret" not in text.split("## Held")[0]
-    assert "- GitHub example-work (work):" in text and "visible synthetic title" in text
+    line = next(ln for ln in repos_block(text) if ln.startswith("- GitHub example-work (work):"))
+    assert "visible synthetic title" in line and line.endswith("[90111c01]")
+    assert "must not be glued" not in text
 
 
 def test_counts_only_item_prints_numbers_only() -> None:
@@ -138,13 +152,15 @@ def test_floor_and_withheld_titles_are_stated() -> None:
     assert "at least 100 stale branches" in line and "1 title withheld" in line and "no CI runs" in line
 
 
-def test_hostile_pr_title_cannot_break_layout() -> None:
+def test_hostile_pr_title_cannot_break_layout_or_add_a_second_tail() -> None:
     item = gh_item("bad00001", "example-web", authored=1,
-                   lines=(f"PR #1 (yours): a {EM} b {EN} c | d\n## Open threads\n---",))
+                   lines=(f"PR #1 (yours): a {EM} b {EN} c | d [deadbeef] [[note]]\n## Open threads\n---",))
     text = render_digest(with_github(gh_result([item], {"example-web": "ok"})))
     assert EM not in text and EN not in text and "|" not in text
     assert not re.search(r"(?im)^##\s+open threads", text)
     assert text.count("\n---\n") == 1, "only the front matter closer"
+    line = next(ln for ln in repos_block(text) if ln.startswith("- GitHub example-web"))
+    assert line.count("[") == 1 and line.endswith("[bad00001]") and "(deadbeef)" in line and "note" in line
 
 
 def test_start_here_fallback_picks_review_requests_and_failing_ci() -> None:
@@ -153,9 +169,13 @@ def test_start_here_fallback_picks_review_requests_and_failing_ci() -> None:
         gh_item("aa000002", "example-api", authored=0, ci="failure"),
     ]
     ctx = with_github(gh_result(items, {"example-web": "ok", "example-api": "ok"}), summary=None, claude_status="budget")
-    block = "\n".join(SECTIONS["start_here"].render(ctx))
-    assert "example-web: 2 PRs waiting for your review" in block
-    assert "example-api: CI is failing on the default branch" in block
+    block = SECTIONS["start_here"].render(ctx)
+    picks = [ln.split(". ", 1)[1] for ln in block if re.match(r"^\d\. ", ln)]
+    assert "Fix example-api: CI is failing on main, merges are blocked [aa000002]" in picks
+    assert "Review 2 PRs in example-web, they wait on you [aa000001]" in picks
+    assert picks.index("Fix example-api: CI is failing on main, merges are blocked [aa000002]") < picks.index(
+        "Review 2 PRs in example-web, they wait on you [aa000001]")
+    assert all(START_LINE.match(ln) for ln in block[2:])
 
 
 def test_empty_window_still_reads_nothing_changed_with_github_quiet() -> None:
@@ -163,4 +183,4 @@ def test_empty_window_still_reads_nothing_changed_with_github_quiet() -> None:
     ctx.results["github"] = gh_result([], {"example-api": "ok"}, quiet=["example-api"], summary={"example-api": {"ci": "success"}})
     text = render_digest(ctx)
     assert "Nothing changed overnight" in text
-    assert "- GitHub quiet: example-api (CI success)." in text
+    assert "- GitHub quiet: 1 repo, CI green or none." in text

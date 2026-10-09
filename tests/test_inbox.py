@@ -873,3 +873,109 @@ def test_decision_audit_records_keep_the_envelope_run_id(cfg: Config, clock: Fak
     r = put(cfg, 3)
     post(client_for(cfg, clock), f"/inbox/{r.id}/reject", {"reason": "no"})
     assert events(cfg, "proposal_rejected")[0]["digest_run_id"] == "digest-2026-10-01"
+
+
+# --- phase 2: slim cards, the one-line Held section, the `next` field ------------------------------------------------
+
+DIGEST_V2 = f"""---
+type: jarvis-digest
+grammar: 2
+job_id: digest-2026-10-02
+date: 2026-10-02
+status: complete
+---
+# Digest
+
+## Start here
+Headline.
+1. Synthetic open thread about the example release, due Friday [{CLEARED_ID}]
+
+## Held back and not summarized
+- Held: 1 sensitive (ids {HELD_ID}; reasons: term:1 x1), 0 policy, 0 over cap. Claude: ok. Run `jarvis held` in a terminal.
+"""
+
+
+def test_the_card_is_slim_and_keeps_the_identifiers_behind_a_disclosure(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg, evidence=[CLEARED_ID, HELD_ID, UNKNOWN_ID, "feedfade"], due_hint=date(2026, 10, 3))
+    text = client_for(cfg, clock).get("/inbox").text
+    card = re.search(r'<section class="card proposal" id="([^"]+)">(.*?)</section>', text, re.S).group(2)
+    order = [f"<h2>{p.title}</h2>", '<p class="why">', '<p class="pills">', '<div class="actions">', '<details class="ids">']
+    positions = [card.index(x) for x in order]
+    assert positions == sorted(positions)
+    assert '<span class="pill bad">3 days late</span>' in card and '<span class="pill ">example-api</span>' in card
+    assert card.count("<form ") == 3 and "outcome unknown" not in card
+    head = card.split('<details class="ids">')[0]
+    assert p.run_id not in head and "Suggested status" not in head and "<dl" not in head  # identifiers are folded away
+    tail = card.split('<details class="ids">')[1]
+    assert p.id in tail and "to do" in tail and "<dt>Run</dt>" in tail
+    # evidence: one line for the ids the note does not carry, never one row each
+    assert tail.count("not in that run") == 1 and "2 ids not in that run" in tail
+    assert f"<code>{UNKNOWN_ID}</code>" in tail and "<code>feedfade</code>" in tail
+    assert f"<code>{CLEARED_ID}</code> Synthetic open thread about the example release" in tail
+    assert f"<code>{HELD_ID}</code>" in tail and HELD_SECRET not in text
+
+
+def test_the_one_line_held_section_still_hides_a_held_evidence_id(cfg: Config, clock: FakeClock) -> None:
+    raw = Path(cfg.paths.vault_write_raw)
+    (raw / "digest-2026-10-02.md").write_text(DIGEST_V2, encoding="utf-8", newline="\n")
+    (cfg.paths.queue / "held" / f"{HELD_ID}.json").unlink()  # the note's Held line is the only trace
+    p = put(cfg, run_id="digest-2026-10-02", evidence=[CLEARED_ID, HELD_ID])
+    text = client_for(cfg, clock).get("/inbox").text
+    assert f"<code>{HELD_ID}</code>" in text and "id only, never summarized" in text
+    assert "Synthetic open thread about the example release, due Friday" in text  # the id tail is stripped from the line
+    assert f"[{CLEARED_ID}]" not in text.split('<section class="card proposal"')[1]
+    assert p.id in text
+
+
+def test_a_maybe_created_card_carries_the_outcome_unknown_pill(cfg: Config, clock: FakeClock) -> None:
+    p = put(cfg)
+    client = client_for(cfg, clock, FakeTracker(UNKNOWN))
+    post(client, f"/inbox/{p.id}/confirm")
+    assert '<span class="pill bad">outcome unknown</span>' in client.get("/inbox").text
+
+
+def test_next_sends_the_browser_back_to_today_or_the_inbox_and_nowhere_else(cfg: Config, clock: FakeClock) -> None:
+    put(cfg, 1)
+    put(cfg, 2)
+    put(cfg, 3)
+    fake = FakeTracker()
+    client = client_for(cfg, clock, fake)
+    home = post(client, "/inbox/p-00000001/confirm", {"next": "/"})
+    assert home.status_code == 303 and home.headers["location"] == "/?ok=confirmed&id=p-00000001"
+    assert "Confirmed: Synthetic proposal 01" in client.get(home.headers["location"]).text
+    inbox_ = post(client, "/inbox/p-00000002/confirm", {"next": "/inbox"})
+    assert inbox_.status_code == 303 and inbox_.headers["location"].startswith("/inbox?ok=confirmed")
+    for bad in ("/activity", "https://evil.example/", "//evil.example", "/inbox/x", "", "javascript:alert(1)"):
+        resp = post(client, "/inbox/p-00000003/confirm", {"next": bad})
+        assert resp.status_code == 400, bad
+    assert len(fake.calls) == 2 and stored(cfg, make_proposal(3)).status == "proposed"
+
+
+def test_the_today_page_offers_an_inline_confirm_for_the_oldest_waiting_proposals(cfg: Config, clock: FakeClock) -> None:
+    put(cfg, 1)
+    fake = FakeTracker()
+    client = client_for(cfg, clock, fake)
+    page = client.get("/").text
+    form = re.search(r'<form method="post" action="(/inbox/p-00000001/confirm)" class="inline">(.*?)</form>', page)
+    assert form and 'name="next" value="/"' in form.group(2)
+    token = re.search(r'name="csrf" value="([^"]+)"', form.group(2)).group(1)
+    resp = client.post(form.group(1), data={"csrf": token, "next": "/"}, headers={"Origin": HOST}, follow_redirects=False)
+    assert resp.status_code == 303 and resp.headers["location"].startswith("/?ok=confirmed") and len(fake.calls) == 1
+
+
+def test_inbox_opens_with_one_sentence_and_the_explanation_behind_a_disclosure(cfg: Config, clock: FakeClock) -> None:
+    put(cfg, 1)
+    put(cfg, 2)
+    text = client_for(cfg, clock).get("/inbox").text
+    head = text.split('<section class="card proposal"')[0]
+    assert '<p class="lede">2 waiting, newest first.</p>' in head
+    assert '<details class="help" id="inbox-help"><summary>How this works</summary>' in head
+    assert "Only the ids of held items are shown, never their content." in head
+    assert '<a class="tap" href="/inbox?sort=due">by due date</a>' in head
+    due = client_for(cfg, clock).get("/inbox?sort=due").text
+    assert '<p class="lede">2 waiting, by due date, undated last.</p>' in due
+    card = text.split('<section class="card proposal"')[1]
+    actions = card.split('<div class="actions">')[1].split('<details class="ids">')[0]
+    assert (actions.index('<button type="submit" class="primary">Confirm</button>') < actions.index("<summary>Edit</summary>")
+            < actions.index("<summary>Reject</summary>"))
+    assert "Edit and confirm</button>" in actions

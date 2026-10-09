@@ -87,7 +87,7 @@ Phases follow the build order in the [design](docs/v1-design.md). Legend: **Done
 | 1 | Inference base | Adapter only | `jarvisd/local.py` talks to a local llama-server on loopback and is tested against a fake server. No model was downloaded, `bin/bench.ps1` was never run, so there is no throughput, latency or accuracy number. Details: [local tier](docs/local-tier.md) |
 | 2 | Vertical slice | Done | The morning digest end to end: queue, scheduler, tier gate, router contract, audit, CLI, toast. Run by hand on the author's machine since 2026-10-05, with a real Claude call. The unattended 06:30 run has not been observed (see "What this is not") |
 | 3 | Claude bridge | Done | The `claude -p` subprocess bridge with its budget ledger and breaker (`jarvisd/claude.py`) is used live. The Agent SDK escalation and claude-code-router are not built, by decision |
-| 4 | Work hub | Adapter only | The views, Inbox, Projects, Ledger and tracker write-back are built and tested offline; a local triage model, Slack and pushed reminders are not built. The page (`jarvisd/hub/app.py`), `jarvis ask`, `jarvis propose` and the tracker adapters never ran for real: no paid proposals run, no confirm or reject outside tests, ClickUp only met a fake server, and no one viewed the page in a browser. GitHub, the ClickUp section and ntfy are adapters tested against fakes. See [hub](docs/hub.md) and [proposals](docs/proposals.md) |
+| 4 | Work hub | Adapter only | Four views (Today, Inbox, Projects, Activity) and the tracker write-back are built and tested offline; a local triage model, Slack and pushed reminders are not built. The page (`jarvisd/hub/app.py`), `jarvis ask`, `jarvis propose` and the tracker adapters never ran for real: no paid proposals run, no confirm or reject outside tests, ClickUp only met a fake server. GitHub, the ClickUp section and ntfy are adapters tested against fakes. See [hub](docs/hub.md) and [proposals](docs/proposals.md) |
 | 5 | Consolidation | Adapter only | `jarvisd/consolidate.py` proposes memory candidates from session notes. Off by default and never run against the real model. Details: [consolidation](docs/consolidation.md) |
 | 6 | Security widening | Not built | No garak, promptfoo or mcp-scan run exists. Only the phase 0 kill-switch simulation is real |
 | 7 | Retrieval | Not built | Native search of the notes tool is used instead |
@@ -160,7 +160,7 @@ One real digest call is recorded in [first-run log](docs/first-run-log.md): 0.00
 - [Design](docs/v1-design.md) and [plan](docs/v1-plan.md): decisions and build order.
 - [Phase 0](docs/phase0.md), [runbook](docs/phase0-runbook.md) and [sandbox policy](docs/sandbox-policy.md): isolation.
 - [Kill switch v1 patch](docs/killswitch-v1-patch.md): how it reaches the v1 daemon.
-- Optional parts, each with its status on top: [local tier](docs/local-tier.md), [hub](docs/hub.md), [proposals](docs/proposals.md), [consolidation](docs/consolidation.md) and [ntfy](docs/notify-ntfy.md).
+- Optional parts, status on top: [local tier](docs/local-tier.md), [hub](docs/hub.md), its [rework contract](docs/hub-rework-contract.md), [proposals](docs/proposals.md), [consolidation](docs/consolidation.md) and [ntfy](docs/notify-ntfy.md).
 - [Changelog](CHANGELOG.md), [contributing](CONTRIBUTING.md) and [citation](CITATION.cff).
 
 ## License

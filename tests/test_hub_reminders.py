@@ -1,10 +1,12 @@
-"""The hub's Reminders view: due dates of accepted and open proposals, grouped by how late they are.
+"""Due dates in the hub: `HubData.reminders()` keeps the buckets, and the Inbox shows them as pills, sorted with
+`?sort=due`. The old Reminders view is a 301 to that sort.
 
 Read-only and offline: synthetic proposals written into tmp_path, a fixed clock (2026-10-06).
 """
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -36,10 +38,17 @@ def _rows(cfg: Config, clock: FakeClock) -> dict[str, dict[str, Any]]:
     return {r["id"]: r for r in HubData(cfg, clock).reminders()}
 
 
+def _client(cfg: Config, clock: FakeClock) -> TestClient:
+    return TestClient(hub_app.create_app(cfg, clock=clock), base_url=HOST)
+
+
 def test_empty_state_renders(tmp_cfg: Config, clock: FakeClock) -> None:
-    resp = TestClient(hub_app.create_app(tmp_cfg, clock=clock), base_url=HOST).get("/reminders")
+    client = _client(tmp_cfg, clock)
+    resp = client.get("/inbox?sort=due")
     assert resp.status_code == 200
-    assert "No reminders" in resp.text and 'href="/reminders"' in resp.text
+    assert "Nothing is waiting" in resp.text and 'href="/inbox"' in resp.text
+    moved = client.get("/reminders", follow_redirects=False)
+    assert moved.status_code == 301 and moved.headers["location"] == "/inbox?sort=due"
 
 
 def test_buckets_and_sources(tmp_cfg: Config, clock: FakeClock) -> None:
@@ -66,15 +75,28 @@ def test_bad_files_are_skipped(tmp_cfg: Config, clock: FakeClock) -> None:
     assert set(_rows(tmp_cfg, clock)) == {"p-ok"}
 
 
+def test_inbox_sorted_by_due_shows_late_pills_and_undated_last(tmp_cfg: Config, clock: FakeClock) -> None:
+    _proposal(tmp_cfg, "p-late", due_hint="2026-10-04", created_at="2026-10-01T06:00:00+00:00")
+    _proposal(tmp_cfg, "p-today", due_hint="2026-10-30", edits={"due": "2026-10-06"}, created_at="2026-10-01T07:00:00+00:00")
+    _proposal(tmp_cfg, "p-soon", due_hint="2026-10-09", created_at="2026-10-01T08:00:00+00:00")
+    _proposal(tmp_cfg, "p-none", created_at="2026-10-01T09:00:00+00:00")
+    client = _client(tmp_cfg, clock)
+    by_due = client.get("/inbox?sort=due").text
+    ids = re.findall(r'<section class="card proposal" id="([^"]+)">', by_due)
+    assert ids == ["p-late", "p-today", "p-soon", "p-none"]
+    assert '<span class="pill bad">2 days late</span>' in by_due and '<span class="pill warn">due today</span>' in by_due
+    assert '<span class="pill ">due in 3 days</span>' in by_due
+    newest = re.findall(r'<section class="card proposal" id="([^"]+)">', client.get("/inbox").text)
+    assert newest == ["p-none", "p-soon", "p-today", "p-late"]  # the default: newest first
+    assert client.get("/inbox?sort=garbage").status_code == 200
+
+
 def test_view_escapes_and_is_read_only(tmp_cfg: Config, clock: FakeClock) -> None:
-    _proposal(tmp_cfg, "p-x", status="confirmed", due_hint="2026-10-05", title="<script>alert(1)</script>",
-              tracker_ref="javascript:alert(1)")
-    _proposal(tmp_cfg, "p-y", status="confirmed", due_hint="2026-10-20", tracker_ref="https://example.invalid/t/1")
+    _proposal(tmp_cfg, "p-x", due_hint="2026-10-05", title="<script>alert(1)</script>")
     tree = sorted(str(p) for p in Path(tmp_cfg.daemon.state_dir).rglob("*"))
-    client = TestClient(hub_app.create_app(tmp_cfg, clock=clock), base_url=HOST)
-    body = client.get("/reminders").text
+    client = _client(tmp_cfg, clock)
+    body = client.get("/inbox?sort=due").text
     assert "<script>alert" not in body and "&lt;script&gt;" in body
-    assert 'href="javascript:' not in body and 'href="https://example.invalid/t/1"' in body
-    assert "Overdue" in body
-    assert client.post("/reminders").status_code == 405
+    assert "1 day late" in body
+    assert client.post("/inbox?sort=due").status_code == 405
     assert sorted(str(p) for p in Path(tmp_cfg.daemon.state_dir).rglob("*")) == tree

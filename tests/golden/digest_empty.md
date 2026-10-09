@@ -14,6 +14,18 @@ local_tier: not_installed
 degraded: false
 cost_usd: 0.0000
 items: {collected: 0, cleared: 0, held_sensitive: 0, held_policy: 0, over_cap: 0}
+grammar: 2
+n_collected: 0
+n_cleared: 0
+n_held: 0
+n_start_here: 0
+n_attention: 0
+n_still_open: 0
+n_still_open_hidden: 0
+n_decided: 0
+n_repos_active: 0
+n_repos_quiet: 3
+n_system_anomalies: 0
 sources: {brain: ok, task: ok, git: ok, system: ok, clickup: disabled, github: not_collected}
 audit_seq: 812
 audit_head: abababababababababababababababababababababababababababababababab
@@ -25,26 +37,22 @@ tags: [jarvis, digest]
 Claude summary unavailable (no items). Deterministic sections below are complete.
 Nothing changed overnight: no commits, no new sessions.
 
+## Attention
+- Nothing broken.
+
 ## Active task
 - No active task recorded.
 
-## Brain: open threads and decisions
-- No open threads, decisions or new sessions.
-
 ## Repos
-- Quiet: example-api, example-web, example-notes.
+- Quiet: 3 repos.
 - GitHub PRs and CI: not collected (the github collector did not run).
 
-## What JARVIS did while you slept
-- Jobs: 1 done, 0 failed. Claude calls: 1 ($0.04, 3.2k tokens). Vault writes: 1. Breaker: closed.
-- Daemon starts since last digest: 2. Unclean exits: 0.
-- RECENT.md age 4.1 h.
+## System
+- All green: 1 job done, 0 failed, $0.04 Claude, breaker closed, disk ok, tasks ok.
 - Checkpoints waiting for /promote-sessions: 2.
 
 ## Held back and not summarized
-- Sensitive, never read or sent: 0 items.
-- Policy (work metadata to Claude disabled): 0 items.
-- Over size cap: 0 items. Claude unavailable: not called, nothing was cleared to send.
+- Held: 0 sensitive, 0 policy, 0 over cap. Claude: not called. Run `jarvis held` in a terminal.
 
 ## Source status
 - brain ok (0 items), task ok, git ok (3 repos, 0 not repos), system ok, clickup disabled, github not collected.

@@ -19,6 +19,22 @@ _EM_RE = re.compile(r"\s*" + _EM_DASH + r"\s*")
 _EN_SPACED_RE = re.compile(r"\s+" + _EN_DASH + r"\s+")
 _UNIT_SEP = "\x1f"
 
+# An open thread older than this (days) is stale: flagged by the brain collector, left out of
+# the digest's Still open section (docs/hub-rework-contract.md, section 1.2).
+STALE_AFTER_DAYS = 7
+
+_WIKILINK_RE = re.compile(r"\[\[[^\]]*\]\]")
+_DATE_RE = re.compile(r"\b\d{4}-\d{2}-\d{2}\b|\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b")
+_ID_RE = re.compile(r"\[[0-9a-f]{8}\]|\bw-[0-9a-f]{6}\b")
+_MARKER_RE = re.compile(r"\((?:stale|see entry point)\)")
+_PUNCT_RE = re.compile(r"[^\w\s]")
+# A session line that says there is nothing to do, and the words a line may be made of once
+# its wikilinks are gone and still say nothing ("Voir [[x]] et [[y]]").
+NO_ACTIVE_WORK = re.compile(r"^no active work\b")
+WIKILINK_FILLER = frozenset({"see", "voir", "cf", "and", "et", "the", "related", "ref", "refs", "aussi", "also"})
+# A line that only points elsewhere ("Related: note-a, note-b"), whatever follows the colon.
+REFERENCE_PREFIX = re.compile(r"^\s*(?:[-*]\s+)?(?:related|see also|voir aussi|refs?|references?)\s*:", re.IGNORECASE)
+
 
 def now_utc() -> datetime:
     """Current time, timezone-aware UTC."""
@@ -82,6 +98,35 @@ def strip_dashes(text: str) -> str:
     if out.endswith(", "):
         out = out[:-2]
     return out
+
+
+def norm_key(text: str) -> str:
+    """The normalised key of an item line: what makes two bullets "the same thread".
+
+    Casefolded, without wikilinks, dates, item and held ids, the `(stale)` and `(see entry
+    point)` markers and punctuation, whitespace collapsed. The brain collector collapses
+    RECENT.md bullets and session lines on it; the hub will key item state on it.
+    """
+    t = text.casefold()
+    t = _WIKILINK_RE.sub(" ", t)
+    t = _DATE_RE.sub(" ", t)
+    t = _ID_RE.sub(" ", t)
+    t = _MARKER_RE.sub(" ", t)
+    t = _PUNCT_RE.sub(" ", t)
+    return " ".join(t.split())
+
+
+def wikilink_only(key: str) -> bool:
+    """True when a normalised key is empty or made only of filler words around wikilinks."""
+    words = key.split()
+    return not words or all(w in WIKILINK_FILLER for w in words)
+
+
+def noise_line(text: str) -> bool:
+    """A thread or session line that carries nothing to act on: "No active work ...", wikilinks only, or a
+    reference line ("Related: ..."). One rule for the collector, the writer and the hub's fallback parser."""
+    key = norm_key(text)
+    return bool(NO_ACTIVE_WORK.match(key)) or wikilink_only(key) or bool(REFERENCE_PREFIX.match(text))
 
 
 def short_id(*parts: object) -> str:

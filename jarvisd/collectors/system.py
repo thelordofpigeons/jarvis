@@ -1,10 +1,12 @@
-"""System collector (design section 8): "what JARVIS did while you slept".
+"""System collector (design section 8): the digest's System section and `jarvis status` lines.
 
-Never Claude-bound. Every item carries `meta["render"] == "deterministic"` and its title is
-the finished digest line, so the renderer prints it and the digest pipeline must keep these
-items out of gating and out of the payload. They hold counts from our own audit log, the
-watchdog and kill switch logs, and two scheduled-task states. No item text, no titles from
-other sources.
+Never Claude-bound. Every item carries `meta["render"] == "deterministic"` and its title is a
+finished one-line fact, so the digest pipeline must keep these items out of gating and out
+of the payload. They hold counts from our own audit log, the watchdog and kill switch logs,
+and the scheduled-task states. No item text, no titles from other sources. The digest's
+System section is rendered from `facts` (one "All green" line, or one line per anomaly, see
+docs/hub-rework-contract.md section 1.2); the item titles stay for the CLI and the tests.
+`LastTaskResult` is decoded through `TASK_RESULTS`, so a reader never meets a raw Windows code.
 
 Sources, each degrading on its own to an "unavailable" line instead of failing the source:
 - the hash-chained audit log, through `AuditLog.records(since=window_start)`;
@@ -54,6 +56,38 @@ RUNNER_TIMEOUT_S = 20.0
 
 # (argv, timeout) -> (returncode, stdout)
 Runner = Callable[[Sequence[str], float], tuple[int, str]]
+
+# Windows Task Scheduler `LastTaskResult` values a reader may meet, decoded to a fixed phrase. Any
+# other code prints as `0x%08X (unknown)`. 0 and 267009 (still running) are the only healthy ones.
+TASK_RESULTS: dict[int, str] = {
+    0: "ok",
+    1: "script error",
+    267009: "still running",
+    267011: "never ran",
+    267014: "stopped by the user",
+    2147750687: "an instance was already running",
+    2147943623: "cancelled",
+    2147946720: "refused by the operator or administrator",
+}
+TASK_OK_CODES = frozenset({0, 267009})
+
+
+def task_result_text(code: object) -> str:
+    """`LastTaskResult` as words plus the hex code, for example `ok (0x00000000)`."""
+    if isinstance(code, bool) or not isinstance(code, int):
+        try:
+            code = int(str(code).strip())
+        except (TypeError, ValueError):
+            return "unknown result"
+    if code < 0 or code > 0xFFFFFFFF:
+        return "unknown result"
+    phrase = TASK_RESULTS.get(code)
+    return f"{phrase} (0x{code:08X})" if phrase else f"0x{code:08X} (unknown)"
+
+
+def task_result_ok(code: object) -> bool:
+    return isinstance(code, int) and not isinstance(code, bool) and code in TASK_OK_CODES
+
 
 _MS_DATE = re.compile(r"/Date\((-?\d+)(?:[+-]\d{4})?\)/")
 # A task that never ran reports a date near 1999-11-30 or year 1 depending on the host.
@@ -289,7 +323,9 @@ class SystemCollector:
             breaker_state=breaker,
             breaker_events=count("breaker"),
             daemon_starts=count("daemon_start"),
+            daemon_crashes=count("daemon_crash"),
             unclean_exits=count("unclean_previous_exit"),
+            config_invalid=count("config_invalid"),
             corrections=count("correction"),
         )
         out = [
@@ -306,10 +342,14 @@ class SystemCollector:
             ),
         ]
         disk = by_event.get("disk_check", [])
+        facts["disk_checked"] = bool(disk)
         if disk:
             last = disk[-1]
-            verdict = "ok" if last.get("ok", True) else "WARNING"
+            disk_ok = bool(last.get("ok", True))
+            verdict = "ok" if disk_ok else "WARNING"
             free = last.get("free_gb")
+            facts["disk_ok"] = disk_ok
+            facts["disk_free_gb"] = free if isinstance(free, (int, float)) and not isinstance(free, bool) else None
             out.append(("disk", f"Disk check: {verdict}" + (f", {free} GB free." if free is not None else ".")))
         else:
             out.append(("disk", "Disk check: no record in this window."))
@@ -339,13 +379,17 @@ class SystemCollector:
                 continue
             last = parse_task_time(info.get("LastRunTime"))
             result = info.get("LastTaskResult")
-            tasks[task] = {"available": True, "last_result": result}
+            decoded = task_result_text(result)
+            tasks[task] = {"available": True, "last_result": result, "last_result_text": decoded,
+                           "ok": task_result_ok(result)}
             if last is None or last < _NEVER_BEFORE:
-                out.append((task, f"{task}: never ran, result {result}."))
+                detail = decoded if result == 267011 else f"never ran, last result {decoded}"
+                out.append((task, f"{task}: {detail}."))
                 continue
             tasks[task]["last_run"] = last.astimezone(ctx.now.tzinfo).isoformat(timespec="minutes")
             stamp = last.astimezone(ctx.now.tzinfo).strftime("%Y-%m-%d %H:%M")
-            out.append((task, f"{task}: last run {stamp}, result {result}."))
+            tasks[task]["last_run_text"] = stamp
+            out.append((task, f"{task}: last run {stamp}, {decoded}."))
         facts["scheduled_tasks"] = tasks
         return out
 

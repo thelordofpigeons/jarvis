@@ -94,6 +94,24 @@ is heuristic for untagged personal content in session notes (section 16).
    next 06:30 produce the note unattended.
 9. Read the next morning's note and `jarvis wrong <id>` anything that was misjudged.
 
+## Reading the note
+
+The note is written in grammar 2 (front matter `grammar: 2`), pinned regex by regex in
+`docs/hub-rework-contract.md` section 1 and rendered by `jarvisd/render.py`. Sections, in order:
+Start here (at most five verb-first lines, Claude-ranked, or a deterministic fallback scored by
+action needed), Attention (`Nothing broken.` or one line per anomaly: CI failing, failed jobs,
+crashes, unclean exits, an overdue task, a held backlog, an open breaker, an invalid config),
+Active task, Still open (one key per thread, RECENT.md and session copies collapsed, resolved
+and cosmetic lines dropped, cap 10, grouped by session), Decided yesterday (window dates only,
+rationale cut), Repos (a line only for a repo that moved, dirty repos on one line, quiet repos as
+a count, GitHub lines only for PRs or failing CI), System (one `All green` line, or one line per
+anomaly with the scheduled task result decoded), Held back (one line), Source status, Flag a
+mistake. Every item line ends in its id ` [xxxxxxxx]`, which `jarvis wrong <id>` takes; nothing
+follows the id. Two sections vanish when empty: Still open and Decided yesterday. The front
+matter counts what each section shows (`n_start_here`, `n_attention`, `n_still_open`,
+`n_still_open_hidden`, `n_decided`, `n_repos_active`, `n_repos_quiet`, `n_system_anomalies`),
+next to the older `items` dict.
+
 ## Reading the audit
 
 `logs/jarvisd-audit.jsonl` has one JSON object per line: `ts`, `event`, `seq`, `prev`, `h`,

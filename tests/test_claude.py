@@ -236,6 +236,13 @@ def test_system_prompt_has_no_dashes() -> None:
     assert chr(0x2014) not in SYSTEM_PROMPT and chr(0x2013) not in SYSTEM_PROMPT
 
 
+def test_system_prompt_asks_for_verb_first_whys_and_skips_resolved_items() -> None:
+    # The Start here grammar (docs/hub-rework-contract.md, section 1.2) depends on these two sentences.
+    assert "Each why starts with an imperative verb and states the deadline or what happens otherwise" in SYSTEM_PROMPT
+    assert "skip items that read as done, delivered, shipped, cosmetic or optional, or already covered by another" in SYSTEM_PROMPT
+    assert "Importance order: overdue or due-today task" in SYSTEM_PROMPT
+
+
 # --- scenarios -------------------------------------------------------------------------
 
 

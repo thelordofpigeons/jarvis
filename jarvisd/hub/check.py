@@ -17,9 +17,7 @@ from fastapi.testclient import TestClient
 from jarvisd.config import Config
 from jarvisd.hub.app import LOOPBACK_HOST, create_app
 
-VIEWS = (("Today", "/"), ("Inbox", "/inbox"), ("Runs", "/runs"), ("Held", "/held"), ("Repos", "/repos"), ("Projects", "/projects"),
-         ("Ledger", "/ledger"), ("Reminders", "/reminders"), ("Audit", "/audit"),
-         ("Status", "/status"))
+VIEWS = (("Today", "/"), ("Inbox", "/inbox"), ("Projects", "/projects"), ("Activity", "/activity"), ("Face", "/face"))
 
 
 @dataclass(frozen=True)
@@ -43,12 +41,13 @@ def run_check(cfg: Config, *, clock: Callable[[], datetime] | None = None) -> li
         except Exception as exc:  # noqa: BLE001
             results.append(CheckResult(name, False, f"{path} raised {type(exc).__name__}: {exc}"))
             continue
-        ok = resp.status_code == 200 and '<main id="main">' in resp.text
+        # /face is its own page (no hub chrome), so it only has to answer 200.
+        ok = resp.status_code == 200 and (path == "/face" or '<main id="main">' in resp.text)
         results.append(CheckResult(name, ok, f"{path} {resp.status_code}, {len(resp.text)} bytes"))
     try:
         post = client.post("/")
         results.append(CheckResult("Read-only", post.status_code == 405, f"POST / answers {post.status_code}"))
-        foreign = TestClient(app, base_url="http://not-allowed.invalid").get("/status")
+        foreign = TestClient(app, base_url="http://not-allowed.invalid").get("/activity")
         results.append(CheckResult("Host guard", foreign.status_code == 403, f"foreign Host answers {foreign.status_code}"))
     except Exception as exc:  # noqa: BLE001
         results.append(CheckResult("Guards", False, f"{type(exc).__name__}: {exc}"))

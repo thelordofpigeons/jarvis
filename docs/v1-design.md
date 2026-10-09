@@ -633,7 +633,12 @@ is always removed. `vault_intent` is audited before the write and `vault_write` 
 `sha256`. Basic Memory sync is run by the existing nightly, not by jarvisd (§4c).
 
 Digest file `C:/Users/<owner>/brain/raw/jarvis/digest-2026-10-06.md` (UTF-8, LF, no
-BOM, bullets only, no tables, no U+2014 or U+2013, ids in square brackets):
+BOM, bullets only, no tables, no U+2014 or U+2013). This is grammar 2 (front matter key
+`grammar: 2`, pinned line by line in `docs/hub-rework-contract.md` section 1): every item line
+ends in one id tail ` [xxxxxxxx]` and nothing follows it, status sentences carry none, and no
+Claude one-liner or second language is glued to a line. The front matter also counts what each
+section shows (`n_start_here`, `n_attention`, `n_still_open`, ...), so the hub reads the
+numbers without parsing the body.
 
 ```
 ---
@@ -661,34 +666,47 @@ tags: [jarvis, digest]
 
 ## Start here
 <headline from Claude, or "Claude summary unavailable (reason). Deterministic sections below are complete.">
-1. [a1b2c3d4] <why, max 160 chars>
-(up to 5; deterministic fallback order when Claude is down: overdue or due-today task,
-repos with commits, newest open threads)
+1. <why: verb first, with a deadline or a consequence, max 159 chars> [a1b2c3d4]
+(up to 5, Claude-ranked; the deterministic fallback scores action needed: overdue or due-today
+task 4, a thread naming a deadline or a blocker 3, CI failing 3, a PR awaiting review 2, a repo
+with commits 1, nothing else)
+
+## Attention
+- Nothing broken.
+(or one line per anomaly, in this order: CI failing, Job failed, Daemon crashed, Unclean exit,
+Task overdue, Backlog held, Breaker open, Config invalid; an id tail when it comes from an item)
 
 ## Active task
-- 123kvxebu5c <name>, status IN REVIEW, due 2026-10-05 (OVERDUE). No ClickUp call was made (v1).
+- 123kvxebu5c <name>, status IN REVIEW, due 2026-10-05 (OVERDUE). [c0ffee01]
 
-## Brain: open threads and decisions
-- [2026-10-04] <thread text> [e5f6a7b8] <Claude one-liner if any>
-- Decisions (7 d): ...
-- New sessions since last digest: 2026-10-03-00: <entry point line> [id]
+## Still open
+- <session slug or notes>: <thread text as written> (4d) [e5f6a7b8]
+- 3 more open threads not shown (cap 10).
+(one key per thread, RECENT.md and session copies collapsed; stale, resolved, cosmetic,
+"No active work" and wikilink-only lines never appear; the section is omitted when empty)
+
+## Decided yesterday
+- <decision, rationale cut> [9f8e7d6c]
+(window dates only, cap 10, omitted when empty)
 
 ## Repos
 - example-api (work) branch test, 3 commits since window, 2 modified, 1 untracked: <subject; subject> [id]
-- Quiet: example-notes, example-site, ...
+- Uncommitted only: example-site 4/2.
+- Quiet: 11 repos.
 - Not a git repo or missing: ...
-- GitHub PRs and CI: not collected in v1 (the active gh account has no access to the work org).
+- GitHub example-web: 2 open PRs (1 yours, 1 awaiting your review), CI failure on main [id]
+- GitHub quiet: 3 repos, CI green or none.
+- GitHub not read: 16 repos (no_access 15, no_remote 1).
 
-## What JARVIS did while you slept
-- Jobs: 1 done, 0 failed. Claude calls: 1 ($0.04, 3.2k tokens). Vault writes: 1. Breaker: closed.
-- Daemon starts since last digest: 2 (expected after reboot). Unclean exits: 0.
-- NotesNightly (a scheduled task of the notes tooling): last run 2026-10-06 02:30, result 0. RECENT.md age 4.1 h.
-- Kill switch trips: 0. Watchdog crashloops: 0. Checkpoints waiting for /promote-sessions: 2.
+## System
+- All green: 1 job done, 0 failed, $0.04 Claude, breaker closed, disk ok, tasks ok.
+(or one line per anomaly: Jobs failed, Daemon crashed, Unclean exits, Breaker, Kill switch,
+Watchdog, Disk, Task with the decoded Windows result such as "refused by the operator or
+administrator (0x800710E0)", Config invalid, Notes index stale, Sessions not filed, Held
+backlog; the consolidation result and a small checkpoint count follow)
 
 ## Held back and not summarized
-- Sensitive, never read or sent: 2 items (ids w-3a9f1c, w-77d20e; reasons: path_under_sensitive x1, tag x1). Run `jarvis held` in a terminal.
-- Policy (work metadata to Claude disabled): 1 item, rendered above without summary.
-- Over size cap: 0 items. Claude unavailable: none.
+- Held: 2 sensitive (ids w-3a9f1c, w-77d20e; reasons: path_under_sensitive x1, tag x1), 1 policy, 0 over cap. Claude: none. Run `jarvis held` in a terminal.
 
 ## Source status
 - brain ok (14 items), task ok, git ok (14 repos, 2 not repos), system ok, clickup disabled, github not collected.
@@ -698,9 +716,9 @@ repos with commits, newest open threads)
 ```
 
 The heading `## Open threads` is never used in this file so `brain-nightly.py` cannot
-confuse it with a session note, and the brain collector excludes `raw/jarvis/`. An empty
-window renders "Nothing changed overnight: no commits, no new sessions" explicitly. All
-Claude-originated strings pass `strip_dashes`.
+confuse it with a session note (the open threads section is `## Still open`), and the brain
+collector excludes `raw/jarvis/`. An empty window renders "Nothing changed overnight: no
+commits, no new sessions" explicitly. All Claude-originated strings pass `strip_dashes`.
 
 ---
 

@@ -393,6 +393,89 @@ def test_digest_lists_held_bullet_by_id_and_reason_only(tmp_cfg: Config, tmp_vau
     assert "Another synthetic thread" in text  # the clean bullets still render
 
 
+# --- one key per thread (docs/hub-rework-contract.md, section 1.2) --------------------------
+
+
+def test_norm_key_strips_what_makes_two_copies_of_one_bullet_differ() -> None:
+    from jarvisd.common import norm_key, wikilink_only
+
+    a = norm_key("[2026-10-05] Stop the two preview servers (`npx preview --stop` in each project). [fba64d93]")
+    b = norm_key("Stop the two preview servers (npx preview --stop in each project) [[2026-10-05-20-notes]] (stale)")
+    assert a == b == "stop the two preview servers npx preview stop in each project"
+    assert norm_key("Due 12/10, see w-0e60e0 and [x] (see entry point)") == "due see and x"
+    assert norm_key("Voir [[2026-10-05-02]] et [[2026-10-05-evidence]].") == "voir et"
+    assert wikilink_only("voir et") and wikilink_only("") and wikilink_only("see the")
+    assert not wikilink_only("see the exporter")
+
+
+def test_a_session_line_that_repeats_a_recent_bullet_collapses_into_the_bullet(tmp_cfg: Config, tmp_vault: Path) -> None:
+    seed_vault(tmp_vault)
+    write(tmp_vault / "RECENT.md", "# Recent\n\n## Open Threads\n- [2026-10-05] Stop the two preview servers "
+                                  "(`npx preview --stop` in each project).\n- [2026-10-04] Synthetic open thread, "
+                                  "waiting on a reviewer\n\n## Recent Decisions\n")
+    set_age(tmp_vault / "RECENT.md", 4.0)
+    body = SESSION_BODY.format(date="2026-10-05").replace(
+        "- Synthetic follow up one",
+        "- Stop the two preview servers (npx preview --stop in each project) [[2026-10-05-20-video-work]]")
+    note = write(tmp_vault / "sessions" / "2026-10-05-20-video-work.md", body)
+    set_age(note, 2.0)
+
+    result = BrainCollector().collect(make_ctx(tmp_cfg))
+
+    threads = [i for i in result.items if i.kind == "brain_thread"]
+    sessions = [i for i in result.items if i.kind == "brain_session"]
+    assert len(threads) == 2
+    assert all("key" in i.meta for i in threads + sessions)
+    survivor = next(i for i in threads if i.text.startswith("Stop the two"))
+    assert survivor.meta["session"] == "2026-10-05-20-video-work", "the dropped session line lends its slug"
+    assert all("Stop the two" not in i.text for i in sessions), "the session copy is gone"
+    assert {i.text for i in sessions} == {"Continue at fixture.py:10 - wire the synthetic thing", "Suivi synthetique deux"}
+    assert result.facts["duplicates_dropped"] == 1
+    assert len({i.meta["key"] for i in threads + sessions}) == len(threads) + len(sessions)
+    # Session items carry a date and an age like RECENT bullets, so the digest can order and age them.
+    assert all(i.meta["date"] == "2026-10-05" and i.meta["age_days"] == 1 and i.meta["stale"] is False for i in sessions)
+
+
+def test_two_recent_bullets_with_one_key_keep_the_newer_date(tmp_cfg: Config, tmp_vault: Path) -> None:
+    seed_vault(tmp_vault)
+    write(tmp_vault / "RECENT.md", "# Recent\n\n## Open Threads\n- [2026-10-03] Confirm the retry budget with the reviewer.\n"
+                                  "- [2026-10-05] Confirm the retry budget with the reviewer\n\n## Recent Decisions\n")
+    set_age(tmp_vault / "RECENT.md", 4.0)
+    result = BrainCollector().collect(make_ctx(tmp_cfg))
+    threads = [i for i in result.items if i.kind == "brain_thread"]
+    assert [i.meta["date"] for i in threads] == ["2026-10-05"]
+    assert result.facts["duplicates_dropped"] == 1
+
+
+def test_no_active_work_and_wikilink_only_session_lines_never_become_items(tmp_cfg: Config, tmp_vault: Path) -> None:
+    seed_vault(tmp_vault)
+    body = (SESSION_BODY.format(date="2026-10-05")
+            .replace("Continue at fixture.py:10 - wire the synthetic thing",
+                     "No active work, check Open threads in [[_INDEX]]")
+            .replace("- Synthetic follow up one", "- Voir [[2026-10-05-02]] et [[2026-10-05-evidence]]."))
+    note = write(tmp_vault / "sessions" / "2026-10-05-20.md", body)
+    set_age(note, 2.0)
+    result = BrainCollector().collect(make_ctx(tmp_cfg))
+    sessions = [i for i in result.items if i.kind == "brain_session"]
+    assert [i.text for i in sessions] == ["Suivi synthetique deux"]
+    assert result.facts["new_sessions"] == 1
+
+
+def test_a_dropped_noise_line_does_not_shift_the_held_ordinal(tmp_cfg: Config, tmp_vault: Path) -> None:
+    seed_vault(tmp_vault)
+    body = SESSION_BODY.format(date="2026-10-05").replace(
+        "- Synthetic follow up one\n- Suivi synthetique deux",
+        f"- Voir [[2026-10-05-02]].\n- Call about the {TERM}\n- Synthetic follow up one")
+    note = write(tmp_vault / "sessions" / "2026-10-05-20.md", body)
+    set_age(note, 2.0)
+    result = BrainCollector().collect(make_ctx(_with_terms(tmp_cfg, TERM)))
+    held = [w for w in result.withheld if w.kind == "brain_session"]
+    assert len(held) == 1 and held[0].source_ref.endswith("#open_thread-2")
+    assert [i.text for i in result.items if i.kind == "brain_session" and i.meta["section"] == "open_thread"] == [
+        "Synthetic follow up one"]
+    assert TERM not in result.model_dump_json().casefold()
+
+
 # --- task ------------------------------------------------------------------------------
 
 
@@ -542,3 +625,13 @@ def test_run_collectors_converts_exceptions_and_timeouts(tmp_cfg: Config) -> Non
     assert not slow.ok and slow.error.startswith("timeout")
     assert not lies.ok and lies.error == "bad_result"
     assert all(r.duration_ms >= 0 for r in results)
+
+
+def test_reference_lines_are_noise_whatever_follows_the_colon() -> None:
+    from jarvisd.common import noise_line, wikilink_only
+
+    assert noise_line("Related: project_note_a, 2026-10-08-note-b")
+    assert noise_line("- See also: [[2026-10-05-02]]") and noise_line("Refs: a, b") and noise_line("Voir aussi : la note")
+    assert wikilink_only("related") and wikilink_only("see also the")
+    assert not noise_line("Related work on the exporter is blocked on the reviewer")
+    assert not noise_line("Rotate the key before the demo")

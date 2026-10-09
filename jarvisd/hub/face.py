@@ -26,8 +26,10 @@ SCRIPT_TAGS = ('<script type="module" src="/static/face/lantern-puppet.js"></scr
 # The companion on every hub view: a rail in the right margin on a wide screen, a dock in the header
 # below that (hub.css .companion). Outside <main>, so the page refresh never swaps it out. The link
 # opens /face, the avatar's own page, for a second window or a phone.
-COMPANION = ('<aside class="companion" aria-label="JARVIS face"><a href="/face" title="Open the face on its own">'
-             + PUPPET_TAG + '</a><p id="state" class="label" role="status" aria-live="polite">idle</p></aside>')
+# The link carries the accessible name; the puppet inside it is decorative for assistive tech.
+COMPANION = ('<aside class="companion" aria-label="JARVIS face"><a href="/face" aria-label="JARVIS face, open" '
+             'title="Open the face on its own">' + PUPPET_TAG.replace("<lantern-puppet ", '<lantern-puppet aria-hidden="true" ', 1)
+             + '</a><p id="state" class="label" role="status" aria-live="polite">idle</p></aside>')
 
 
 def installed(face_dir: Path) -> bool:
@@ -177,6 +179,72 @@ export function mapState(status, now, memory) {
   return { state, react };
 }
 
+function hhmm(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) { return "?"; }
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+}
+
+function sameDay(a, b) {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+}
+
+// The header's status strip, the same words HubData.strip() renders on the server: health word, last digest,
+// next digest, waiting, failed. Returns { health, rest, short }; `short` is the phone line (the last digest
+// only when it failed or is missing, no "0 failed").
+export function stripText(status, now) {
+  const breaker = (status.breaker || {}).state || "closed";
+  let health;
+  if (status.kill) { health = "Kill switch on."; }
+  else if (status.pause) { health = "Paused."; }
+  else if (breaker !== "closed") { health = "Claude calls paused."; }
+  else if (status.running) { health = "Running."; }
+  else { health = "Stopped."; }
+  const last = status.last_digest;
+  let digest = "No digest yet.";
+  let digestOk = false;
+  if (last && last.at) {
+    const failed = last.status === "failed" || last.status === "error";
+    digest = "Last digest " + hhmm(last.at) + (failed ? ", failed." : ".");
+    digestOk = !failed;
+  }
+  const parts = [digest];
+  const short = digestOk ? [] : [digest];
+  if (status.next_due) {
+    const due = new Date(status.next_due);
+    if (!isNaN(due.getTime())) {
+      const tomorrow = new Date(now.getTime() + 24 * 3600 * 1000);
+      const when = sameDay(due, now) ? "today" : (sameDay(due, tomorrow) ? "tomorrow" : due.toISOString().slice(0, 10));
+      parts.push("Next " + hhmm(status.next_due) + " " + when + ".");
+      short.push(parts[parts.length - 1]);
+    }
+  }
+  const waiting = Number((status.face || {}).inbox_pending || 0);
+  const failed = Number((status.queue || {}).failed || 0);
+  parts.push(String(waiting) + " waiting.");
+  parts.push(String(failed) + " failed.");
+  short.push(String(waiting) + " waiting.");
+  if (failed) { short.push(String(failed) + " failed."); }
+  return { health, rest: parts.join(" "), short: short.join(" ") };
+}
+
+function paintStrip(status) {
+  const strip = document.getElementById("strip");
+  if (!strip) { return; }
+  const text = stripText(status, new Date());
+  const b = document.createElement("b");
+  b.setAttribute("aria-live", "polite");
+  b.textContent = text.health;
+  const long = document.createElement("span");
+  long.className = "long";
+  long.textContent = text.rest;
+  const short = document.createElement("span");
+  short.className = "short";
+  short.textContent = text.short;
+  strip.textContent = "";
+  strip.append(b, " ", long, short);
+}
+
 function start() {
   const el = document.getElementById("avatar");
   const label = document.getElementById("state");
@@ -193,6 +261,7 @@ function start() {
       .then(function (status) {
         const out = mapState(status, new Date(), memory);
         show(out.state);
+        paintStrip(status);
         if (out.react && typeof el.react === "function") { el.react(out.react, HAPPY_MS); }
       })
       .catch(function () { show("confused", "hub unreachable"); });

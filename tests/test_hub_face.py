@@ -250,3 +250,72 @@ def test_state_mapping(tmp_path: Path) -> None:
         "fresh": "idle", "stale": "sleepy", "first_react": None, "react_on_new_done": "happy", "react_once": None,
         "no_react_on_failure": None, "listening_stays": "listening",
     }
+
+
+# --- phase 2: the status strip and the preferences script ----------------------------------------------------------
+
+
+def test_every_view_loads_prefs_js_and_the_strip_sits_in_the_header(face_cfg: Config) -> None:
+    body = _client(face_cfg).get("/activity").text
+    assert '<script src="/static/prefs.js"></script>' in body
+    header = body.split("</header>")[0]
+    assert '<p class="strip" id="strip" role="status">' in header and "<b " in header
+    assert '<b aria-live="polite">' in header  # the strip's health word is the live region
+    assert 'aria-label="JARVIS face, open"' in body and '<lantern-puppet aria-hidden="true"' in body
+    assert body.index("</header>") < body.index('<aside class="companion"') < body.index('<main id="main">')
+    prefs = _client(face_cfg).get("/static/prefs.js")
+    assert prefs.status_code == 200 and "localStorage" in prefs.text and "hub:refreshed" in prefs.text
+    assert not re.search(r"https?://", prefs.text)
+    assert "stripText" in face.JS and 'getElementById("strip")' in face.JS
+
+
+def test_the_companion_css_keeps_the_pill_visible_above_phone_width() -> None:
+    from jarvisd.hub.assets import CSS
+
+    assert "body[data-face] .bar .pill { display: none; }" not in CSS
+    wide = CSS.split("@media (max-width: 87.99rem)")[1].split("@media (max-width: 40rem)")[0]
+    assert ".pill" not in wide  # the dock no longer hides the health pill between 40rem and 88rem
+    assert "body[data-face] .strip { padding-right: 3.25rem; }" in wide
+    phone = CSS.split("@media (max-width: 40rem)")[1]
+    assert ".companion lantern-puppet { width: 1.75rem; height: 1.75rem; }" in phone  # inside the 2.75rem link
+
+
+STRIP_HARNESS = """
+import { stripText } from "%s";
+const now = new Date(2026, 9, 6, 12, 0, 0);
+const base = () => ({ running: true, kill: false, pause: null, breaker: { state: "closed" },
+  queue: { pending: 0, running: 0, done: 1, failed: 2 }, next_due: new Date(2026, 9, 7, 6, 30).toISOString(),
+  last_digest: { at: new Date(2026, 9, 6, 6, 31).toISOString(), status: "complete" },
+  face: { inbox_pending: 5, last_finished: null } });
+const out = {};
+const plain = stripText(base(), now);
+out.plain = { health: plain.health, rest: plain.rest };
+out.short = plain.short;
+const failed = base(); failed.last_digest.status = "failed"; out.failed = stripText(failed, now).rest;
+out.failedShort = stripText(failed, now).short;
+const none = base(); none.last_digest = null; out.none = stripText(none, now).rest;
+const kill = base(); kill.kill = true; out.kill = stripText(kill, now).health;
+const pause = base(); pause.pause = { reason: "x" }; out.pause = stripText(pause, now).health;
+const open = base(); open.breaker.state = "open"; out.open = stripText(open, now).health;
+const stopped = base(); stopped.running = false; out.stopped = stripText(stopped, now).health;
+const today = base(); today.next_due = new Date(2026, 9, 6, 18, 0).toISOString(); out.today = stripText(today, now).rest;
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_strip_text_matches_the_server_words(tmp_path: Path) -> None:
+    module = tmp_path / "face.mjs"
+    module.write_text(face.JS, encoding="utf-8")
+    runner = tmp_path / "strip.mjs"
+    runner.write_text(STRIP_HARNESS % module.as_uri(), encoding="utf-8")
+    done = subprocess.run([NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    got = json.loads(done.stdout)
+    assert got["plain"] == {"health": "Running.", "rest": "Last digest 06:31. Next 06:30 tomorrow. 5 waiting. 2 failed."}
+    assert got["short"] == "Next 06:30 tomorrow. 5 waiting. 2 failed."  # the phone line drops a good last digest
+    assert got["failed"].startswith("Last digest 06:31, failed.")
+    assert got["failedShort"].startswith("Last digest 06:31, failed.")  # and keeps a failed one
+    assert got["none"].startswith("No digest yet.")
+    assert (got["kill"], got["pause"], got["open"], got["stopped"]) == ("Kill switch on.", "Paused.", "Claude calls paused.", "Stopped.")
+    assert "Next 18:00 today." in got["today"]

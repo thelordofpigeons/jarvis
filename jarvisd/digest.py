@@ -35,7 +35,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import json
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -82,7 +82,8 @@ QUIET_STATUSES = frozenset({"ok", "disabled", "no_items"})
 # Failures that need a human, shown with the "breaker" toast.
 BREAKER_STATUSES = frozenset({"breaker", "isolation_anomaly", "isolation_breach", "payload_blocked"})
 _RUN_SUFFIX = re.compile(r"-r(\d+)$")
-_ATTENTION_LINE = re.compile(r"^\d+\. \[")
+# A numbered Start here line (grammar 2: `N. Why [id]`), counted for the toast.
+_ATTENTION_LINE = re.compile(r"^\d+\. ")
 
 
 class Retry(Exception):
@@ -575,9 +576,15 @@ def _fail(run: _Run, reason: str, ctx: render.DigestContext, counts: dict[str, i
 
 
 def _dry_result(run: _Run, refs: Sequence[WithheldItem], payload: GatedPayload | None, outcome: _Outcome,
-                gated: int) -> dict[str, Any]:
+                gated: int, results: Sequence[CollectResult] = (), state: LocalTier = "not_installed") -> dict[str, Any]:
+    # The note a real run would write with these items and no Claude summary, rendered in memory
+    # so a dry run can be read against the digest grammar. Nothing is written. Claude was never
+    # called, so the headline says "dry run" rather than inheriting the default "ok".
+    shown = replace(outcome, claude_status="dry_run") if outcome.summary is None and outcome.claude_status == "ok" else outcome
+    note = render.render_digest(_context(run, results, refs, state, shown, payload, 0.0, [])) if results else ""
     return {
         "status": "dry_run",
+        "note": note,
         "payload": payload.text if payload is not None else "",
         "payload_sha256": payload.sha256 if payload is not None else "",
         "payload_bytes": payload.byte_size if payload is not None else 0,
@@ -609,7 +616,7 @@ def run_digest_job(job: Job, deps: Deps, *, mode: str = "daemon") -> dict[str, A
     _aggregate(run, gates, refs, state)
     payload, outcome = _seal(run, items, gates)
     if run.dry:
-        return _dry_result(run, refs, payload, outcome, len(items))
+        return _dry_result(run, refs, payload, outcome, len(items), results, state)
 
     if payload is not None and payload.item_ids:
         outcome = _summarize(run, payload)

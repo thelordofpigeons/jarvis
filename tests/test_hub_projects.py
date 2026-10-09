@@ -1,4 +1,5 @@
-"""The hub's Projects and Ledger views (Q3): read-only, derived from digests, proposals and run manifests.
+"""The hub's Projects view and the Delivered record on Activity (Q3): read-only, derived from digests, proposals and
+run manifests.
 
 The tree is synthetic: repo names are made up and every file is written into tmp_path.
 """
@@ -96,12 +97,13 @@ def _rows(cfg: Config, clock: FakeClock) -> dict[str, dict[str, Any]]:
 
 def test_both_views_render_with_zero_repos_and_no_state(tmp_cfg: Config, clock: FakeClock) -> None:
     client = _client(tmp_cfg, clock)
-    for path in ("/projects", "/ledger"):
+    for path in ("/projects", "/activity"):
         resp = client.get(path)
         assert resp.status_code == 200, path
-        assert 'href="/projects"' in resp.text and 'href="/ledger"' in resp.text
+        assert 'href="/projects"' in resp.text and 'href="/activity"' in resp.text
     assert "No repositories" in client.get("/projects").text
-    assert "Nothing delivered" in client.get("/ledger").text
+    assert "Nothing delivered" in client.get("/activity").text
+    assert client.get("/ledger", follow_redirects=False).headers["location"] == "/activity#delivered"
 
 
 def test_rows_follow_config_order_with_digest_facts(history: Config, clock: FakeClock) -> None:
@@ -200,16 +202,16 @@ def test_monthly_rollup_sums(delivered: Config, clock: FakeClock) -> None:
 
 def test_ledger_page_shows_links_and_escapes(delivered: Config, clock: FakeClock) -> None:
     _proposal(delivered, "p9", status="confirmed", tracker_ref="https://tracker.example.test/t/<b>", title="<script>x</script>")
-    body = _client(delivered, clock).get("/ledger").text
+    body = _client(delivered, clock).get("/activity").text
     assert 'href="/digest/digest-2026-10-06"' in body
     assert 'href="https://tracker.example.test/t/1"' in body and "candidates-2026-10-02.md" in body
-    assert "<script>x</script>" not in body and "<b>" not in body
+    assert "<script>x</script>" not in body and "t/<b>" not in body and "t/&lt;b&gt;" in body
     assert "2026-10" in body and "0.0400" in body
 
 
 def test_javascript_tracker_refs_are_not_linked(delivered: Config, clock: FakeClock) -> None:
     _proposal(delivered, "p8", status="confirmed", tracker_ref="javascript:alert(1)")
-    body = _client(delivered, clock).get("/ledger").text
+    body = _client(delivered, clock).get("/activity").text
     assert 'href="javascript' not in body
 
 
@@ -218,7 +220,7 @@ def test_views_never_write_and_refuse_post(delivered: Config, clock: FakeClock, 
         return {p.as_posix(): (p.stat().st_size, p.stat().st_mtime_ns) for p in tmp_path.rglob("*") if p.is_file()}
     before = snap()
     client = _client(delivered, clock)
-    for path in ("/projects", "/ledger"):
+    for path in ("/projects", "/activity"):
         assert client.get(path).status_code == 200
         assert client.post(path).status_code == 405
     assert snap() == before
@@ -275,7 +277,7 @@ def test_the_proposals_runs_spend_is_in_the_ledger_and_the_monthly_sum(delivered
     assert "2" in runs[0]["title"]
     roll = {r["month"]: r for r in led["rollup"]}
     assert roll["2026-10"]["cost"] == pytest.approx(0.24) and roll["2026-10"]["runs"] == 1 and roll["2026-10"]["count"] == 4
-    body = _client(delivered, clock).get("/ledger").text
+    body = _client(delivered, clock).get("/activity").text
     assert "Proposals run" in body and "0.2000" in body
 
 
@@ -299,3 +301,66 @@ def test_the_tracked_config_leaves_stale_days_to_its_default() -> None:
 
     raw = tomllib.loads((ROOT / "jarvis.toml").read_text(encoding="utf-8"))
     assert "stale_days" not in raw["hub"] and HubCfg().stale_days == 14
+
+
+# --- phase 2: Active and Quiet, the always-dirty exemption ----------------------------------------------------------
+
+
+def test_active_repos_come_first_and_quiet_ones_are_one_line(history: Config, clock: FakeClock) -> None:
+    rows = _rows(history, clock)
+    assert rows["beta-repo"]["active"] is True  # dirty, CI failing, overdue task
+    assert rows["alpha-repo"]["active"] is True  # stale is a risk
+    page = HubData(history, clock).projects_page()
+    assert [r["name"] for r in page["active"]] == ["alpha-repo", "beta-repo"] and page["quiet"] == []
+    body = _client(history, clock).get("/projects").text
+    assert "<h2>Active</h2>" in body and "Quiet: 0 repos." in body and '<details id="raw-repos">' in body
+    assert 'class="scroll cards"' in body and 'data-label="Risks and active task"' in body
+    history.hub.stale_days = 30
+    page = HubData(history, clock).projects_page()
+    assert [r["name"] for r in page["quiet"]] == ["alpha-repo"]
+    body = _client(history, clock).get("/projects").text
+    assert "Quiet: 1 repo." in body and '<details id="quiet">' in body
+
+
+def test_always_dirty_repos_skip_the_uncommitted_risk_and_do_not_count_as_active(history: Config, clock: FakeClock) -> None:
+    _digest(history, "2026-10-07", ["- beta-repo (work) branch dev, 0 commits since window, 3 modified, 1 untracked [bbbb0004]",
+                                    "- Quiet: alpha-repo.", "- GitHub quiet: alpha-repo (CI success), beta-repo (CI success)."])
+    clock.set(datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc))
+    history.hub.stale_days = 60
+    before = _rows(history, clock)["beta-repo"]
+    assert any("uncommitted" in r for r in before["risks"]) and before["active"] is True
+    history.hub.always_dirty = ["Beta-Repo"]  # case does not matter
+    after = _rows(history, clock)["beta-repo"]
+    assert not any("uncommitted" in r for r in after["risks"]) and after["active"] is False and after["always_dirty"] is True
+    body = _client(history, clock).get("/projects").text
+    assert "always dirty" in body and "Quiet: 2 repos." in body
+
+
+def test_always_dirty_default_is_empty_and_the_example_local_file_may_set_it() -> None:
+    from jarvisd.config import HubCfg
+
+    assert HubCfg().always_dirty == []
+    assert HubCfg(always_dirty=["notes-vault"]).always_dirty == ["notes-vault"]
+
+
+def test_since_yesterday_delta_per_repo(history: Config, clock: FakeClock) -> None:
+    beta = _rows(history, clock)["beta-repo"]
+    assert "uncommitted 3/1, was 2/0" in beta["delta"] and "CI now failing" in beta["delta"] and "1 open PRs, was 0" in beta["delta"]
+    assert _rows(history, clock)["alpha-repo"]["delta"] == []
+
+
+def test_active_table_has_no_days_idle_column_zeros_are_empty_and_rows_are_anchored(history: Config, clock: FakeClock) -> None:
+    body = _client(history, clock).get("/projects").text
+    active = body.split("<h2>Active</h2>")[1].split('<p class="quiet">')[0]
+    assert "Days idle" not in active and 'data-label="Open proposals">0<' not in active
+    assert 'data-label="Open proposals"></td>' in active  # a zero is an empty cell, so the phone card hides it
+    assert '<tr id="repo-alpha-repo">' in active and '<tr id="repo-beta-repo">' in active
+    # housekeeping risks are amber, real breaks red, and the GitHub cell does not repeat the CI risk pill
+    assert 'class="pill warn">uncommitted work for' in active and 'class="pill warn">stale repo, idle' in active
+    assert 'class="pill bad">CI failing</span>' in active and 'class="pill bad">active task overdue</span>' in active
+    assert active.count("CI failing") == 1 and "1 open PR" in active
+    assert '<details class="help" id="projects-help"><summary>How this works</summary>' in body
+    history.hub.stale_days = 30
+    body = _client(history, clock).get("/projects").text
+    assert "<summary>The 1 quiet repo</summary>" in body and "Which ones" not in body
+    assert '<span class="age">idle 26 days</span>' in body  # the idle count moved into the Quiet disclosure

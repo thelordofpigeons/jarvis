@@ -12,7 +12,14 @@ import pytest
 from conftest import CANARY, FakeClock
 from jarvisd.audit import AuditLog
 from jarvisd.collectors import CollectContext
-from jarvisd.collectors.system import SystemCollector, parse_task_time, task_info_argv
+from jarvisd.collectors.system import (
+    TASK_RESULTS,
+    SystemCollector,
+    parse_task_time,
+    task_info_argv,
+    task_result_ok,
+    task_result_text,
+)
 from jarvisd.config import Config
 from jarvisd.jobstore import JobStore
 from jarvisd.models import CollectResult
@@ -121,7 +128,7 @@ def test_numbers_from_audit_logs_and_schtasks(tmp_cfg: Config, audit: AuditLog, 
     lines = lines_of(result)
     assert lines[0] == "Jobs: 1 done, 1 failed. Claude calls: 1 ($0.04, 3.2k tokens). Vault writes: 1. Breaker: closed."
     assert "Daemon starts since last digest: 2. Unclean exits: 1. Breaker events: 1." in lines
-    assert "ExampleNightly: last run 2026-10-06 02:30, result 0." in lines
+    assert "ExampleNightly: last run 2026-10-06 02:30, ok (0x00000000)." in lines
     assert "ExampleWeekly: unavailable (could not query the scheduled task)." in lines
     assert (
         "Kill switch: 1 trip (last: manual-stop), 1 dry run. "
@@ -137,9 +144,49 @@ def test_numbers_from_audit_logs_and_schtasks(tmp_cfg: Config, audit: AuditLog, 
         1, 1, 2, 1)
     assert (f["watchdog_trip_requests"], f["log_malformed_lines"]) == (1, 1)
     assert f["gpu_yield_noise"] == 5
-    assert f["scheduled_tasks"]["ExampleNightly"]["last_result"] == 0
+    nightly = f["scheduled_tasks"]["ExampleNightly"]
+    assert nightly["last_result"] == 0 and nightly["ok"] is True and nightly["last_result_text"] == "ok (0x00000000)"
+    assert nightly["last_run_text"] == "2026-10-06 02:30"
     assert f["scheduled_tasks"]["ExampleWeekly"]["available"] is False
+    assert (f["daemon_crashes"], f["config_invalid"]) == (0, 0)
+    assert (f["disk_checked"], f["disk_ok"], f["disk_free_gb"]) == (True, True, 123)
     assert not any("gpu" in ln.lower() for ln in lines), "gpu_yield is noise and is not shown"
+
+
+def test_crashes_and_invalid_config_are_counted_as_facts(tmp_cfg: Config, audit: AuditLog, clock: FakeClock) -> None:
+    audit.emit("daemon_crash", error_type="RuntimeError", where="daemon.py:1", thread="MainThread")
+    audit.emit("daemon_crash", error_type="OSError", where="daemon.py:2", thread="MainThread")
+    audit.emit("config_invalid", error="toml")
+    f = make(tmp_cfg, audit, clock).collect(ctx_for(tmp_cfg)).facts
+    assert (f["daemon_crashes"], f["config_invalid"]) == (2, 1)
+
+
+def test_task_results_are_decoded_to_words_plus_the_hex_code() -> None:
+    assert task_result_text(0) == "ok (0x00000000)"
+    assert task_result_text(1) == "script error (0x00000001)"
+    assert task_result_text(267009) == "still running (0x00041301)"
+    assert task_result_text(267011) == "never ran (0x00041303)"
+    assert task_result_text(267014) == "stopped by the user (0x00041306)"
+    assert task_result_text(2147750687) == "an instance was already running (0x8004131F)"
+    assert task_result_text(2147943623) == "cancelled (0x800704C7)"
+    assert task_result_text(2147946720) == "refused by the operator or administrator (0x800710E0)"
+    assert task_result_text(4660) == "0x00001234 (unknown)"
+    assert task_result_text("4660") == "0x00001234 (unknown)"
+    assert task_result_text(None) == "unknown result" and task_result_text("garbage") == "unknown result"
+    assert task_result_text(True) == "unknown result" and task_result_text(-1) == "unknown result"
+    assert TASK_RESULTS[2147946720] == "refused by the operator or administrator"
+    assert task_result_ok(0) and task_result_ok(267009)
+    assert not task_result_ok(1) and not task_result_ok(2147946720) and not task_result_ok(None) and not task_result_ok(True)
+
+
+def test_a_refused_task_is_reported_in_words(tmp_cfg: Config, audit: AuditLog, clock: FakeClock) -> None:
+    runner = FakeRunner(weekly=(0, json.dumps({"LastRunTime": "2026-10-06T06:00:00+01:00", "LastTaskResult": 2147946720})))
+    result = make(tmp_cfg, audit, clock, runner).collect(ctx_for(tmp_cfg))
+    assert "ExampleWeekly: last run 2026-10-06 06:00, refused by the operator or administrator (0x800710E0)." in lines_of(result)
+    weekly = result.facts["scheduled_tasks"]["ExampleWeekly"]
+    assert weekly["ok"] is False and weekly["last_result"] == 2147946720
+    assert weekly["last_result_text"] == "refused by the operator or administrator (0x800710E0)"
+    assert "2147946720" not in "\n".join(lines_of(result)), "the raw code never reaches a line"
 
 
 def test_items_are_deterministic_and_carry_no_free_text(tmp_cfg: Config, audit: AuditLog, clock: FakeClock) -> None:
@@ -204,8 +251,11 @@ def test_powershell_seven_iso_times_and_never_ran(tmp_cfg: Config, audit: AuditL
     runner = FakeRunner(weekly=(0, json.dumps({"LastRunTime": "2026-10-05T02:30:00+01:00", "LastTaskResult": 267011})))
     runner.nightly = (0, json.dumps({"LastRunTime": "/Date(-62135596800000)/", "LastTaskResult": 267011}))
     lines = lines_of(make(tmp_cfg, audit, clock, runner).collect(ctx_for(tmp_cfg)))
-    assert "ExampleNightly: never ran, result 267011." in lines
-    assert "ExampleWeekly: last run 2026-10-05 02:30, result 267011." in lines
+    assert "ExampleNightly: never ran (0x00041303)." in lines
+    assert "ExampleWeekly: last run 2026-10-05 02:30, never ran (0x00041303)." in lines
+    runner.nightly = (0, json.dumps({"LastRunTime": "/Date(-62135596800000)/", "LastTaskResult": 1}))
+    lines = lines_of(make(tmp_cfg, audit, clock, runner).collect(ctx_for(tmp_cfg)))
+    assert "ExampleNightly: never ran, last result script error (0x00000001)." in lines
 
 
 def test_parse_task_time() -> None:

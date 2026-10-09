@@ -14,10 +14,11 @@ jarvis hub --check         # render every view once against the real state, then
 
 ## Status, stated plainly
 
-- **Built and tested:** the read-only views (Today, Runs, Held, Repos, Projects, Ledger, Reminders, Audit,
-  Status), the Inbox with its three POST routes, the loopback, Host and Origin guards, the CSRF
-  token, the read-only data layer and `jarvis hub --check`. The suites are `tests/test_hub.py`,
-  `tests/test_hub_projects.py` and `tests/test_inbox.py`. They drive the real application through
+- **Built and tested:** the four views (Today, Inbox, Projects, Activity) and the face, the Inbox with its three
+  POST routes, the loopback, Host and Origin guards, the CSRF token, the read-only data layer, the digest
+  parser (`jarvisd/hub/digestparse.py`) and `jarvis hub --check`. The suites are `tests/test_hub.py`,
+  `tests/test_hub_digestparse.py`, `tests/test_hub_projects.py`, `tests/test_hub_reminders.py`,
+  `tests/test_hub_face.py` and `tests/test_inbox.py`. They drive the real application through
   FastAPI's `TestClient` over a throwaway tree that the daemon's own writers filled, and
   `tests/test_hub.py` compares the whole tree byte for byte before and after every read-only view.
   The Inbox tests use a fake tracker, or the markdown adapter on a throwaway vault.
@@ -25,7 +26,7 @@ jarvis hub --check         # render every view once against the real state, then
   ClickUp service, and a confirm of a proposal made by the real model (no paid proposals run has
   been made). Everything the Inbox does has met only a fake tracker, the markdown adapter on a
   throwaway vault and a local stand-in for ClickUp.
-- **Not built:** pushed reminders (ntfy), ClickUp due dates in the Reminders view, local triage of events, Slack data, a SQLite index,
+- **Not built:** pushed reminders (ntfy), ClickUp due dates on the Inbox pills, local triage of events, Slack data, a SQLite index,
   authentication, TLS. The page has no login because it listens on loopback only.
 - **Tested against fakes only:** the ClickUp adapter has never talked to the real ClickUp service,
   only to a local stand-in server. Use `dry_run` first (below).
@@ -33,55 +34,131 @@ jarvis hub --check         # render every view once against the real state, then
   `tailscale serve` steps below were run on 2026-10-09 (Tailscale 1.102) and `/face` answered 200
   at `https://<machine>.<tailnet>.ts.net/` with the name listed in `allowed_hosts`. A second
   device has not opened it yet.
-- **Not looked at in a browser by the author of the tests.** The tests prove the HTML,
-  headers and data; they cannot prove the layout looks right. Open it once.
+- **Looked at in a browser once, at 1440 and 375 px, after the phase 2 rework (2026-10-09).** The tests prove
+  the HTML, headers and data; the screenshots proved the layout once. Open it after any change to the CSS.
 
 ## The views
 
+Four tabs and the face. The order on Today is fixed and ends with "That's all." so the page has an end; the
+record-keeping views open on a summary and keep their tables behind disclosures. Section 2 of
+`docs/hub-rework-contract.md` is the specification the code follows.
+
 | View | What it shows | Where the data comes from |
 |---|---|---|
-| Today | The latest digest note rendered from markdown, its front matter as facts, and the held references by id, kind and reason | the digest notes in the vault's `raw/jarvis` folder, `queue/held/` |
-| Runs | One row per digest job: date, status, item counts, cost, audit witness, link to the note | `state/runs/<job>/run.json`, `queue/*/`, the audit log |
-| Held | The held references and what to run in a terminal (`jarvis held`, `jarvis wrong <id>`, `--leak`) | `queue/held/` |
-| Repos | The Repos section of the latest digest, one row per repository | the same digest note |
-| Projects | One row per repository in `[digest].repos`: branch, commits, uncommitted files, open pull requests, CI, days idle, risks, open proposals | the digest notes, `state/proposals/`, the config |
-| Ledger | What was delivered, newest first, and a rollup per month: confirmed proposals with their tracker link, digests written, consolidation notes, proposals runs, with the recorded cost | `state/proposals/`, `state/runs/<job>/run.json`, the digest notes |
-| Inbox | The proposals waiting for a decision, with confirm, edit and reject forms; each evidence id shows its digest line if it was cleared, and the id alone if it was held | `state/proposals/`, the digest note of the proposal's run |
-| Reminders | Due dates of confirmed proposals and of proposals still in the Inbox, grouped overdue, today, next 7 days, later; an edited due date beats the model's hint | `state/proposals/` |
-| Audit | Chain verification result, the newest events (default 50), today's budget | `logs/jarvisd-audit*.jsonl`, `state/budget.json` |
+| Today | Attention (what is broken, or "Nothing broken."), Needs you (the headline and at most five ranked lines), Waiting for you (the Inbox count and the three oldest proposals with an inline Confirm), Changed since yesterday (the repo delta against the previous note, decisions recorded, held count), then three disclosures: Everything else (active task, still open threads by group, decided yesterday, system), Full digest (the metadata card and the whole note) and Item ids (the `jarvis wrong <id>` command per ranked line) | the two newest digest notes in the vault's `raw/jarvis` folder, parsed by `jarvisd/hub/digestparse.py`; `state/proposals/` |
+| Inbox | The proposals waiting for a decision as slim cards: title, why, pills (project, due, outcome unknown), the three buttons; the identifiers and the evidence behind "Evidence and ids". Newest first; `?sort=due` orders by due date, undated last. Evidence ids the run's note does not carry collapse to one line | `state/proposals/`, the digest note of the proposal's run, `queue/held/` |
+| Projects | Active repositories first (commits in the latest note, open pull requests, failing CI, any risk, or uncommitted work unless the repo is listed in `[hub].always_dirty`): branch, what moved since yesterday, the counts, GitHub, risk pills (red for CI failing and an overdue task, amber for uncommitted work and a stale repo) and the active task, open proposals (a zero is an empty cell). Then "Quiet: N repos" with a disclosure naming them with their idle days, and the Repos table as collected behind "Repos as collected". A card list under 40rem; each Active row is anchored `#repo-<name>` so an Attention row on Today can point at it | the digest notes (up to 60), `state/proposals/`, the config |
+| Activity | A strip of ten tiles for the last 7 days (digest runs, failed, Claude USD, proposals made, confirmed, rejected, kept back, flagged wrong, chain verified, next digest), the chain card and today's budget, then disclosures: Digest runs, Delivered, Kept back, Audit records and Daemon status | `state/runs/<job>/run.json`, `queue/*/`, `logs/jarvisd-audit*.jsonl`, `state/budget.json`, `state/proposals/`, `queue/held/`, `state/` |
 | Face (`/face`, not in the nav) | The lantern avatar, with a state taken from `/api/status`; see "The face" | `/api/status`, the avatar folder |
-| Status | The same lines `jarvis status` prints, plus the queue counts | `state/`, `queue/`, the audit log |
 
-`/api/status` returns the Status data as JSON. `/digest/<job id>` shows one digest note;
-the Runs table links to it.
+`/api/status` returns the Daemon status data as JSON, plus `last_digest.at` (the finish stamp the strip
+shows) and the `face` block. `/digest/<job id>` shows one digest note; the Digest runs table links to it.
+
+### Old addresses
+
+The views that the rework folded away answer `301 Moved Permanently` to the place that absorbed them,
+query string dropped, so a bookmark or a `tailscale serve` link keeps working: `/runs` to
+`/activity#runs`, `/ledger` to `/activity#delivered`, `/held` to `/activity#held`, `/audit` to
+`/activity#audit`, `/status` to `/activity#status`, `/repos` to `/projects` and `/reminders` to
+`/inbox?sort=due`. The table is `REDIRECTS` in `jarvisd/hub/views.py`. 301 rather than 308 because every
+redirected route was GET only.
+
+### The status strip
+
+Every page opens with one line, first in the header at every width, rendered by the server from the same
+data `/api/status` returns and repainted by the face poll every 5 seconds: the health word (`Running.`,
+`Stopped.`, `Paused.`, `Kill switch on.` or `Claude calls paused.` when the breaker is open), `Last digest
+HH:MM.` (or `, failed.`, or `No digest yet.`), `Next HH:MM today|tomorrow.`, `N waiting.` (proposals in the
+Inbox) and `N failed.` (jobs in `queue/failed`). Under 40rem the strip shows a shorter line (the last digest
+only when it failed or is missing, no `0 failed.`), so it stays one line on a phone. The avatar thumbnail
+docks at its right end in a 2.75rem link at every width (the puppet inside it is 1.75rem under 40rem); on a
+screen of 88rem and more the 10rem companion rail in the right margin stays. The health word in bold is the
+one live region (`aria-live`); there is no separate daemon pill.
+
+### What the parser does with the note
+
+`jarvisd/hub/digestparse.py` imports `GRAMMAR`, `ID_TAIL` and `HEADINGS` from `jarvisd/render.py`, so a
+renamed heading fails at import, not in a browser, and reads each section with the contract's regexes. A
+note without a `grammar` front matter key (written before the rework) is read with the grammar 1 patterns:
+the Brain section becomes Still open and Decided yesterday, the Attention block is derived from the overdue
+task and the failing CI lines the note does carry. Every id tail ` [xxxxxxxx]` is removed from the visible
+text and kept in a `data-id` attribute. A line that matches no pattern is kept and printed as it is under
+its block, and a missing heading counts as zero, so a wording change in the writer degrades to raw lines
+instead of an empty page. The Full digest disclosure always holds the whole note.
+
+### Label map
+
+The daemon's vocabulary is translated once, in `label` and the maps around it in `jarvisd/hub/views.py`:
+
+| The daemon says | The page says |
+|---|---|
+| audit seq, witness | Audit record N |
+| local_tier not_installed / unavailable / up | Local model: not installed / unavailable / up |
+| items {collected..} | 87 collected, 76 summarised, 11 held |
+| held_policy, held_sensitive | kept back (work metadata), kept back (sensitive, never read) |
+| term:3, tag_frontmatter | matched private rule 3, tagged sensitive |
+| over_cap | too long to send |
+| result 2147946720 | refused by the operator or administrator (0x800710E0) |
+| degraded_no_llm, partial, complete, failed, noop | written without Claude, written with a source missing, written, failed, nothing to do |
+| breaker open / closed | Claude calls paused / Claude calls allowed |
+| proposed, confirmed, edited_confirmed, rejected | waiting for you, confirmed, confirmed with edits, rejected |
+| Runs, Ledger, Reminders, Status | Digest runs, Delivered, due pills, Daemon status |
+| consolidation candidates | memory candidates |
+| counts_only | counts only, names kept back |
+| work_policy | kept back (work metadata) |
+| GitHub ci failure / timed_out / success | CI failing / CI timed out / CI green (dropped when the same risk pill is on the row) |
+| watermark, heartbeat, kill file, audit head (Daemon status) | Digest window start, Last sign of life, Kill switch, Audit head, as a definition list; the CLI block sits behind "Raw CLI output" |
+| RECENT.md age N h, result N (a grammar 1 System line) | notes index updated N h ago, the decoded task result |
+| next digest 2026-10-10 06:30 (Activity tile) | Tomorrow 06:30, Today 18:00 |
+
+A code the operator needs for a terminal command (a held id) stays visible; a reason code the map translates
+is shown once, in words, and the raw code only when the map has nothing to say.
+
+### Disclosures and the refresh
+
+Collapsing uses native `<details>`. Which ones you opened is remembered per page in your browser's
+`localStorage` by `/static/prefs.js` (loaded on every page, with or without the refresh script) and
+restored after `/static/hub.js` swaps `<main>`, which announces `hub:refreshed` on the document when it
+does. Nothing of that reaches the server. The refresh is a plain `fetch` of the same URL every
+`[hub].refresh_s` seconds, paused while the tab is hidden; the Inbox never refreshes itself.
 
 Held items are references. The page shows the id, the kind and the reason code, and drops
 the source path before the data reaches any view (`jarvisd/hub/data.py`), because resolving
 an id to its source is terminal-only by design (design D5).
 
-The Repos view does not run git. It shows what the collector found when the last digest was
-built, so a repo changed since then does not show up until the next digest.
+The Projects view runs no git and asks no model. Each row comes from the Repos section of the digest
+notes, the proposals folder and the config, so a repo changed since the last digest does not show up until
+the next one. The risks are fixed rules, not a judgement: no activity for `[hub].stale_days` days or more
+(default 14), uncommitted work for 2 days or more, CI failing, and the active task marked overdue. Activity
+is a commit or an uncommitted change seen in one of the last 60 digest notes; a repository whose tree is
+always dirty (a notes vault) would be flagged every day, so `[hub].always_dirty` lists the repos that never
+get the uncommitted-work risk and are not Active for their dirty counts alone (the names are private, set
+them in `jarvis.local.toml`). A repository with no activity in any digest on file counts as idle for as
+long as those notes reach back, shown as a number with a plus sign, so the longest idle repositories are
+flagged too. The active task is shown under a repository only when its line contains a keyword from
+`[hub.task_projects]` in `jarvis.local.toml`; the mapping is private and the tracked file holds none. A
+repository the digest has not covered yet reads "no digest data" in the Quiet list; in a grammar 2 note a
+configured repository named nowhere is quiet with zero counts.
 
-The Projects view runs no git and asks no model either. Each row comes from the Repos section
-of the digest notes, the proposals folder and the config. The risks are fixed rules, not a
-judgement: no activity for `[hub].stale_days` days or more (default 14), uncommitted work for 2 days
-or more, CI failing, and the active task marked overdue. Activity is a commit or an uncommitted
-change seen in one of the last 60 digest notes; the page reads no git and no reflog, so a repository
-whose tree is always dirty counts as active (and is flagged as uncommitted work instead). A
-repository with no activity in any digest on file counts as idle for as long as those notes reach
-back, shown as a number with a plus sign, so the longest idle repositories are flagged too. The active task is shown under a repository only when its line
-contains a keyword from `[hub.task_projects]` in `jarvis.local.toml`; the mapping is private
-and the tracked file holds none. A repository the digest has not covered yet reads "no digest
-data".
+Delivered (on Activity) lists only what has evidence on disk: a confirmed proposal that carries a tracker
+link, a digest run that wrote its note, a consolidation run that wrote its candidates note, a proposals
+run that wrote its proposals. A proposal has no cost of its own, a run shows the cost its manifest recorded
+(a proposals run's paid call included), and the monthly rollup adds them. It is the delivery record the
+spec calls for, not a timesheet.
 
-The Ledger lists only what has evidence on disk: a confirmed proposal that carries a tracker
-link, a digest run that wrote its note, a consolidation run that wrote its candidates note, a
-proposals run that wrote its proposals. A proposal has no cost of its own, a run shows the cost its
-manifest recorded (a proposals run's paid call included), and the monthly rollup adds them. It is the delivery record the spec calls for, not a timesheet.
+The audit witness in Digest runs is the audit record that the run's manifest points at. The page looks the
+record up in an index built once per audit snapshot and prints its short hash. A manifest that points at a
+record the log no longer holds (rotation, pruning) says so instead of showing a hash.
 
-The audit witness in Runs is the audit record that the run's manifest points at. The page
-looks the record up and prints its short hash. A manifest that points at a record the log no
-longer holds (rotation, pruning) says so instead of showing a hash.
+### What a page costs
+
+Each route calls one method of `HubData` (`today`, `projects_page`, `activity`, `status`) that returns
+everything its view needs; the views are pure functions and never read a file. The folders read on every
+request (held, proposals, run manifests, the newest queue files, the digest notes) are parsed once per
+directory signature (name, size and mtime of each file), the way the audit log already was, so
+`/api/status`, which the face polls every 5 seconds, reads the three newest files of `queue/done` and
+`queue/failed` and nothing else once warm (`tests/test_hub.py` counts the reads). Digest runs is linear in
+the number of runs.
 
 ## Why it does not simply call the CLI code
 
@@ -275,9 +352,10 @@ Face" shortcut from `deploy/make-shortcuts.ps1` runs this launcher.
 
 The same puppet is also on every hub view, as the companion: on a wide screen (88rem and up) a 10rem lantern
 with its state under it, fixed in the right margin next to whatever you are reading; below that a 2.75rem
-lantern docked at the right of the header, where it replaces the daemon pill (the state is still read out
-to assistive tech). It sits outside `<main>`, so the page refresh never resets it, and clicking it opens
-`/face`. The companion appears only when the assets are installed; otherwise the views are as before.
+link docked at the right end of the status strip (the puppet inside it shrinks to 1.75rem under 40rem, the
+hit box does not). It sits outside `<main>`, so the page refresh never
+resets it, and clicking it opens `/face`. The companion appears only when the assets are installed; otherwise
+the views are as before. The same poll that moves the avatar repaints the status strip.
 
 Where the files come from. `[hub].face_dir` (default `~/lantern-avatar`) is read, never written, and only these
 names are served under `/static/face/`: `lantern.js`, `lantern-puppet.js`, `body/poses.json` and `body/<name>.png`
@@ -374,16 +452,14 @@ Restart `jarvis hub` after changing it. Bare host names only: no scheme, port or
 |---|---|---|
 | `port` | 8765 | listen port, 1024 to 65535 |
 | `refresh_s` | 30 | an open page fetches itself again this often; 0 removes the script |
-| `audit_rows` | 50 | rows on the Audit view |
+| `audit_rows` | 50 | rows in the Audit records disclosure on Activity |
 | `allowed_hosts` | none | extra `Host` names, see above |
 | `stale_days` | 14 | Projects view: stale badge once a repository shows no commit or uncommitted change in the digest notes for this many days (1 to 365) |
 | `face_dir` | `~/lantern-avatar` | folder the `/face` page serves the avatar from, see "The face" |
 | `task_projects` | none | Projects view: repository name to keywords that tie the active task to it; set it in `jarvis.local.toml` |
+| `always_dirty` | `[]` | Projects view: repositories whose tree is always dirty; they never get the uncommitted-work risk and their dirty counts alone do not make them Active. Names are private: set it in `jarvis.local.toml` |
 
 `[tracker]` and `[propose]` have their own tables, see "Where a confirmed proposal goes" and [proposals](proposals.md).
-
-The refresh is a plain `fetch` of the same URL and a swap of the page body; it pauses while
-the tab is hidden.
 
 ## Dependencies
 
@@ -409,7 +485,7 @@ in place of `httpx`. `opentelemetry-api` is pulled in by the pinned `fastapi` re
   the proxy pass the Host through.
 - A card says the outcome of an earlier attempt is unknown: see "An unknown outcome blocks a plain
   second click" above.
-- "daemon not running" while the scheduled task is up: the heartbeat is older than two
+- "Stopped." in the strip while the scheduled task is up: the heartbeat is older than two
   minutes or its process is gone. `jarvis status` asks the lock instead.
 - "Chain BROKEN": read the incident runbook in `docs/v1-design.md`, section 16.
 - The port is taken: another hub is running. Use `--port`.

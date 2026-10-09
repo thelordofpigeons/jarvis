@@ -29,6 +29,13 @@ Withholding granularity (design sections 6 and 8):
   derived tag. A term hit in a session note holds that line only, because every RECENT.md
   bullet is term-scanned on its own and a term elsewhere says nothing about the other bullets.
 
+One key per thread (docs/hub-rework-contract.md, section 1.2): RECENT.md is generated from the
+session notes, so the same bullet used to arrive twice with two ids. Every `brain_thread` and
+`brain_session` item now carries `meta["key"] = common.norm_key(text)`; duplicates on the key
+collapse, the RECENT.md bullet wins (it has a date) and the dropped session item lends its
+`meta["session"]` to the survivor so the digest can still group it. Session lines that say
+"No active work" or hold nothing but wikilinks are dropped before they become items.
+
 Limits:
 - Session dates come from the file name (`YYYY-MM-DD-...`), falling back to the mtime date.
 """
@@ -40,11 +47,10 @@ from datetime import date, datetime, time, timezone
 from pathlib import Path
 
 from jarvisd.collectors import CollectContext, withheld_ref
-from jarvisd.common import iso, short_id
+from jarvisd.common import STALE_AFTER_DAYS, iso, noise_line, norm_key, short_id
 from jarvisd.models import CollectResult, Item, WithheldItem
 from jarvisd.tier import DERIVED_TAG, safe_read_text, scan_terms
 
-STALE_AFTER_DAYS = 7
 RECENT_WARN_HOURS = 30.0
 MAX_SESSIONS = 50
 MAX_PROBES = 40
@@ -141,6 +147,44 @@ def _parse_recent(text: str) -> list[_Bullet]:
     return bullets
 
 
+def is_noise_line(line: str) -> bool:
+    """A session line that carries nothing to act on: "No active work ...", wikilinks only, or a reference line."""
+    return noise_line(line)
+
+
+def _newer(a: Item, b: Item) -> Item:
+    """Of two RECENT.md bullets with one key, the one with the newer date (the first on a tie)."""
+    return b if str(b.meta.get("date", "")) > str(a.meta.get("date", "")) else a
+
+
+def dedup_items(items: list[Item]) -> tuple[list[Item], int]:
+    """Collapse `brain_thread` and `brain_session` items that share a normalised key.
+
+    Every thread and session item gets `meta["key"]`. A RECENT.md bullet beats a session line
+    (it carries a date and a stable position), the newer of two bullets wins, and a dropped
+    session line gives its `session` slug to the survivor for grouping. Decisions pass through
+    untouched. Returns the kept items in their original order and how many were dropped.
+    """
+    for it in items:
+        if it.kind in ("brain_thread", "brain_session", "brain_decision"):
+            it.meta["key"] = norm_key(it.text)
+    winners: dict[str, Item] = {}
+    for it in items:
+        if it.kind == "brain_thread":
+            key = it.meta["key"]
+            winners[key] = _newer(winners[key], it) if key in winners else it
+    for it in items:
+        if it.kind == "brain_session":
+            key = it.meta["key"]
+            prev = winners.get(key)
+            if prev is None:
+                winners[key] = it
+            elif prev.kind == "brain_thread" and not prev.meta.get("session"):
+                prev.meta["session"] = it.meta.get("session", "")
+    kept = [it for it in items if it.kind not in ("brain_thread", "brain_session") or winners.get(it.meta["key"]) is it]
+    return kept, len(items) - len(kept)
+
+
 class BrainCollector:
     """Collector named `brain`. Stateless: everything comes from the context."""
 
@@ -169,6 +213,8 @@ class BrainCollector:
         kept = self._split_held_bullets(ctx, bullets, recent_path, facts, withheld)
         items = self._bullet_items(kept, tainted, today, recent_path)
         items.extend(session_items)
+        items, dropped = dedup_items(items)
+        facts["duplicates_dropped"] = dropped
 
         facts["orphan_checkpoints"] = self._count_checkpoints(brain / "session-checkpoints")
         facts["new_sessions"] = new_sessions
@@ -283,7 +329,7 @@ class BrainCollector:
             new_sessions += 1
             # Term hits do not taint the date: every RECENT.md bullet is term-scanned on its
             # own, so a term elsewhere in the note says nothing about the other bullets.
-            items.extend(self._session_items(path, mtime, text, ctx, withheld))
+            items.extend(self._session_items(path, mtime, text, ctx, withheld, day, ctx.now.date()))
         for path, _, mtime in probes:
             # Content is discarded: this read only decides whether the date is tainted.
             if isinstance(safe_read_text(path, ctx.cfg, [sessions_dir], terms=False), WithheldItem):
@@ -310,7 +356,8 @@ class BrainCollector:
 
     @staticmethod
     def _session_items(
-        path: Path, mtime: datetime, text: str, ctx: CollectContext, withheld: list[WithheldItem]
+        path: Path, mtime: datetime, text: str, ctx: CollectContext, withheld: list[WithheldItem],
+        day: date | None = None, today: date | None = None,
     ) -> list[Item]:
         stem = path.stem
         out: list[Item] = []
@@ -318,8 +365,14 @@ class BrainCollector:
             ("entry_point", "entry point", _entry_lines(_section_body(text, "Next session entry point"))),
             ("open_thread", "open thread", _bullets(_section_body(text, "Open threads"))),
         )
+        if day is None:
+            day = _session_day(path.name, mtime, mtime.tzinfo)
+        age_days = max(0, (today - day).days) if today is not None else 0
         for section, label, lines in parts:
             for n, line in enumerate(lines, start=1):
+                # The ordinal stays positional, so dropping a noise line never shifts a held ref.
+                if is_noise_line(line):
+                    continue
                 hit = scan_terms(line, ctx.cfg)
                 if hit is not None:
                     ref = f"{path.as_posix()}#{section}-{n}"
@@ -335,7 +388,8 @@ class BrainCollector:
                         ts=iso(mtime),
                         paths=[str(path)],
                         priority=1,
-                        meta={"session": stem, "section": section},
+                        meta={"session": stem, "section": section, "date": day.isoformat(), "age_days": age_days,
+                              "stale": age_days > STALE_AFTER_DAYS},
                     )
                 )
         return out

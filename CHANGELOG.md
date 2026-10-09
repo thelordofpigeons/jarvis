@@ -3,6 +3,83 @@
 All notable changes to this project. Dates are the day the work was verified on the author's
 machine. The format follows Keep a Changelog; versions are not published to PyPI.
 
+## Unreleased
+
+### Hub: four views (`docs/hub-rework-contract.md` sections 2 to 5)
+
+The hub half of the rework, verified offline and in a browser at 1440 and 375 px on 2026-10-09. Nothing was
+sent, confirmed or written outside the tests.
+
+- Four views: Today, Inbox, Projects, Activity, plus `/face`. `/runs`, `/ledger`, `/held`, `/audit`, `/status`,
+  `/repos` and `/reminders` answer 301 to the view that absorbed them (`REDIRECTS` in `jarvisd/hub/views.py`).
+- Today is rebuilt from the parsed note (`jarvisd/hub/digestparse.py`, grammar 2 with a grammar 1 fallback,
+  raw lines kept when a pattern misses): Attention, Needs you, Waiting for you (three oldest proposals with an
+  inline Confirm, `next` accepted only as `/` or `/inbox`), Changed since yesterday (the delta against the
+  previous note), then Everything else, Full digest and Item ids behind `<details>`, and "That's all." Ids
+  leave the visible text and live in `data-id`.
+- A one-line status strip opens every page (health word, last digest, next digest, waiting, failed) with the
+  avatar at its right end at every width; the health word is the one live region and the daemon pill is gone.
+  Under 40rem the strip shows a shorter line. `/api/status` adds `last_digest.at`; `face.js` repaints the
+  strip on each poll.
+- Review fixes (phase 2 verification): 44px tap targets under 40rem (tabs, avatar link, buttons, inputs,
+  the `tap` links); local type stated and argued in `hub.css` (Bahnschrift, then Segoe UI Variable, with
+  Cascadia Mono for code); spacing and radius tokens; hover and focus states; Inbox actions as one row of
+  three controls with the Edit and Reject forms opening below; the Inbox and Projects explanations behind a
+  "How this works" disclosure; Activity tiles five per row from 64rem with "Tomorrow 06:30"; Activity gets
+  h2s ("Last 7 days", "Records"); Projects drops the Days idle column, prints zeros as empty cells, colours
+  housekeeping risks amber and real breaks red, anchors rows for the Today Attention link; the Daemon status
+  disclosure is a definition list with the CLI block nested; the grammar 1 fallback de-duplicates Still open
+  on `norm_key`, applies the writer's exclusions and decodes the System counters.
+- Writer: the fallback Start here template is verb-first, "before" and "by" are no longer deadline words,
+  Claude whys must read as an order (`render.imperative`), reference lines ("Related: ...") are noise,
+  decisions are cut at a dash before `clean()`, a thread that quotes the active task id is not repeated
+  under Still open, and the prompt no longer asks for per-item summaries.
+- Inbox cards are slim (title, why, pills, three buttons; identifiers and evidence behind a disclosure),
+  `?sort=due` sorts by due date, unresolvable evidence ids collapse to one line.
+- Projects absorbs Repos: Active first, "Quiet: N repos" with a disclosure, the old table behind
+  `raw-repos`, a card list under 40rem. New key `[hub].always_dirty` (default empty).
+- Activity absorbs Runs, Ledger, Held, Audit and Status behind a 7-day tile strip and five disclosures.
+  Jargon goes through one label map (`docs/hub.md`).
+- `/static/prefs.js` remembers open disclosures per page in `localStorage` and restores them after the
+  refresh (`hub.js` now dispatches `hub:refreshed`).
+- Performance: `/api/status` reads the three newest files of `queue/done` and `queue/failed` and nothing else
+  once warm (held, proposals, manifests, the newest queue files and the digest notes are cached by directory
+  signature); the audit witness is an index lookup; one `HubData` method per route.
+
+### Digest writer: grammar 2
+
+Digest grammar 2 (`docs/hub-rework-contract.md` section 1), the writer half of the hub rework. The
+audit of 2026-10-09 found the note unreadable: every open thread printed twice (once from
+RECENT.md, once from its session note, with two ids), ten decisions a day with their rationale,
+hashes and a second language glued to each line, raw counters and an undecoded Windows result
+code under System. Verified with `jarvis run-digest --dry-run`; nothing was written.
+
+### Changed
+- `jarvisd/render.py`: sections are now Start here, Attention, Active task, Still open, Decided
+  yesterday, Repos, System, Held back and not summarized, Source status, Flag a mistake. Every item
+  line ends in one id tail ` [xxxxxxxx]` and nothing follows it; Claude one-liners are no longer
+  glued to lines. `GRAMMAR`, `ID_TAIL` and `HEADINGS` are exported for the hub. New front matter
+  keys: `grammar` and twelve `n_*` counters.
+- Start here lines are verb first with a deadline or a consequence; the Claude prompt
+  (`jarvisd/claude.py`) asks for that and tells the model to skip done, cosmetic, optional or
+  already covered items. The deterministic fallback scores action needed (overdue task, deadline
+  or blocker words, CI failing, PR review, commits) instead of taking the newest threads.
+- Attention: deterministic, `Nothing broken.` or one line per anomaly (CI failing, failed jobs,
+  daemon crashes, unclean exits, overdue task, held backlog over 20, breaker open, invalid config).
+- Still open replaces the Brain section: one key per thread (`common.norm_key`), RECENT.md and
+  session copies collapsed in `collectors/brain.py` with the session slug kept for grouping; stale,
+  resolved, cosmetic, "No active work" and wikilink-only lines never print; cap 10 with a count line.
+- Decided yesterday: window dates only, rationale cut, cap 10, omitted when empty.
+- Repos: a line only for a repo with commits or an ahead/behind count, dirty repos on one
+  `Uncommitted only` line, `Quiet: N repos.`, GitHub lines only for PRs or failing CI, the unread
+  repos as a count by state instead of sixteen names.
+- System: one `All green` line, or one line per anomaly; `collectors/system.py` decodes
+  `LastTaskResult` (`TASK_RESULTS`) and adds the `daemon_crashes`, `config_invalid` and disk facts.
+  Held back is one line. The "No ClickUp call was made (v1)" suffix is gone.
+- `jarvis run-digest --dry-run` now also renders the note in memory (`result["note"]`).
+- Goldens regenerated deliberately for grammar 2; `tests/test_render.py` checks every line against
+  the contract regexes.
+
 ## 1.2.0 - 2026-10-06
 
 - Reminders view in the hub (`/reminders`, `HubData.reminders`): due dates of confirmed and open proposals, grouped by
