@@ -646,7 +646,34 @@ class HubData:
             "pause": state.pause_info() if (state and state.paused()) else None,
             "held_count": len(self.held()),
             "audit": {"seq": seq, "head": head or "0" * 64},
+            "face": self.face_signal(),
         }
+
+    def face_signal(self) -> dict[str, Any]:
+        """What the /face page needs and the CLI status lacks: proposals waiting and the newest finished job.
+
+        Reads the three newest files of queue/done and queue/failed (by modification time), so the cost does not
+        grow with the age of the queue."""
+        newest: dict[str, Any] | None = None
+        for state in ("done", "failed"):
+            folder = self.queue_dir / state
+            try:
+                files = sorted((p for p in _json_files(folder)), key=lambda p: p.stat().st_mtime, reverse=True)[:3]
+            except OSError:
+                files = []
+            for path in files:
+                raw = _read_json(path)
+                if not isinstance(raw, dict):
+                    continue
+                try:
+                    job = Job.model_validate(raw)
+                except ValidationError:
+                    continue
+                stamp = job.history[-1].ts if job.history else job.created_at
+                if newest is None or stamp > newest["at"]:
+                    newest = {"id": job.id, "state": state, "at": stamp}
+        pending = sum(1 for p in self.proposals() if p["status"] == "proposed")
+        return {"inbox_pending": pending, "last_finished": newest}
 
     @staticmethod
     def status_lines(data: dict[str, Any]) -> list[str]:

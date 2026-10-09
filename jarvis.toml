@@ -251,6 +251,7 @@ port = 8765
 refresh_s = 30                     # an open page re-fetches itself this often; 0 turns the script off
 audit_rows = 50                    # rows on the Audit view
 # stale_days = 14                  # Projects view: stale badge once a repo shows no commit or uncommitted change in the digests for this many days (the default; commented out so a daemon still running older code keeps accepting this file)
+# face_dir = "~/lantern-avatar"    # /face page: folder with lantern.js, lantern-puppet.js and body/*.png (docs/hub.md); commented out so a daemon still running older code keeps accepting this file
 # allowed_hosts = []               # extra Host header names, for `tailscale serve`; the tailnet name is private, set it in jarvis.local.toml
 
 # ---------------------------------------------------------------------------------------

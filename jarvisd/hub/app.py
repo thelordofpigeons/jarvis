@@ -5,6 +5,7 @@ Boundaries, all enforced here and tested:
   `tailscale serve` proxies a tailnet address to that loopback port.
 - A Host header that is not loopback or listed in [hub].allowed_hosts gets 403. That stops a
   web page on another origin from reading the hub through DNS rebinding.
+- /face serves an allowlisted set of files from [hub].face_dir (jarvisd/hub/face.py); nothing else of that folder.
 - Everything is GET except POST /inbox/{id}/confirm, /edit and /reject; any other method gets 405 from the
   router. Those three read a small urlencoded body, and only after three checks: the Host guard above, an
   Origin that is absent or names the very host (and port) the request arrived on, and the per-process CSRF token
@@ -36,7 +37,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from jarvisd import inbox
 from jarvisd.config import Config
 from jarvisd.hub import inbox as inbox_view
-from jarvisd.hub import views
+from jarvisd.hub import face, views
 from jarvisd.hub.assets import CSS, JS
 from jarvisd.hub.data import HubData
 
@@ -249,6 +250,30 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port
     def status_json() -> Response:
         return Response(json.dumps(data.status(), indent=2, ensure_ascii=False, default=str),
                         media_type="application/json")
+
+    @app.get("/face", response_class=HTMLResponse)
+    def face_page() -> HTMLResponse:
+        # Not installed is a page, not a 500: the avatar folder is optional.
+        return HTMLResponse(face.PAGE if face.installed(cfg.hub.face_dir) else face.NOT_INSTALLED)
+
+    @app.get("/static/face.css")
+    def face_css() -> Response:
+        return Response(face.CSS, media_type="text/css; charset=utf-8")
+
+    @app.get("/static/face.js")
+    def face_js() -> Response:
+        return Response(face.JS, media_type="text/javascript; charset=utf-8")
+
+    @app.get("/static/face/{name:path}")
+    def face_asset(name: str) -> Response:
+        path = face.resolve_asset(cfg.hub.face_dir, name)
+        if path is None:
+            raise StarletteHTTPException(status_code=404)
+        try:
+            body = path.read_bytes()
+        except OSError:
+            raise StarletteHTTPException(status_code=404) from None
+        return Response(body, media_type=face.media_type(path))
 
     @app.get("/static/hub.css")
     def css() -> Response:

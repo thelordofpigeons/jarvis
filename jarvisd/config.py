@@ -434,6 +434,9 @@ class HubCfg(_Forbid):
     # Projects view: repo name -> keywords. The active task line is shown under a repo when it contains one
     # of them (case-insensitive). Real project names live in jarvis.local.toml, never in the tracked file.
     task_projects: dict[str, list[str]] = Field(default_factory=dict)
+    # The /face page: folder holding lantern.js, lantern-puppet.js and body/*.png. Only those names are served.
+    # A missing folder makes /face say the avatar is not installed. "~" is the current user's home.
+    face_dir: Path = Field(default_factory=lambda: Path.home() / "lantern-avatar")
 
     @field_validator("allowed_hosts")
     @classmethod
@@ -588,6 +591,7 @@ _PATH_KEYS: dict[str, tuple[str, ...]] = {
     "paths": ("root", "queue", "logs", "models", "vault_write_raw", "vault_write_sessions"),
     "daemon": ("state_dir",),
     "notify": ("toast_script",),
+    "hub": ("face_dir",),
 }
 
 

@@ -48,6 +48,7 @@ jarvis hub --check         # render every view once against the real state, then
 | Inbox | The proposals waiting for a decision, with confirm, edit and reject forms; each evidence id shows its digest line if it was cleared, and the id alone if it was held | `state/proposals/`, the digest note of the proposal's run |
 | Reminders | Due dates of confirmed proposals and of proposals still in the Inbox, grouped overdue, today, next 7 days, later; an edited due date beats the model's hint | `state/proposals/` |
 | Audit | Chain verification result, the newest events (default 50), today's budget | `logs/jarvisd-audit*.jsonl`, `state/budget.json` |
+| Face (`/face`, not in the nav) | The lantern avatar, with a state taken from `/api/status`; see "The face" | `/api/status`, the avatar folder |
 | Status | The same lines `jarvis status` prints, plus the queue counts | `state/`, `queue/`, the audit log |
 
 `/api/status` returns the Status data as JSON. `/digest/<job id>` shows one digest note;
@@ -262,6 +263,54 @@ Behaviour worth knowing before the first real send:
 - A proposal's `tracker_ref` accepts an http, https or `file:` link, so both adapters can record
   theirs. The Ledger turns only http and https links into anchors; a `file:` link is shown as text.
 
+## The face
+
+`/face` is the avatar's home: one `<lantern-puppet>` (the paper-lantern character from the `lantern-avatar`
+project) filling the window on a dark page, with its current state written underneath. It is meant for a small
+always-on window next to your work: `binace-window.cmd` opens it in an app-mode Edge (Chrome if Edge is
+missing) of 420 by 460 pixels, on the port in `[hub].port` (falling back to 8765, or pass a port as the first
+argument). The hub has to be running (`jarvis hub`).
+
+Where the files come from. `[hub].face_dir` (default `~/lantern-avatar`) is read, never written, and only these
+names are served under `/static/face/`: `lantern.js`, `lantern-puppet.js`, `body/poses.json` and `body/<name>.png`
+(letters, digits, dot, dash and underscore; no sub-folders). Anything else, a `..` in any spelling, a backslash, a
+drive letter, or a link that leads out of the folder, answers 404. The page's own stylesheet and script
+(`/static/face.css`, `/static/face.js`) are constants in `jarvisd/hub/face.py`, like the other views. If the
+folder or its two scripts are missing, `/face` answers 200 with a plain "avatar assets are not installed" page.
+
+The page follows the same boundaries as the rest of the hub: loopback only, the Host guard, GET only, and the
+Content-Security-Policy unchanged (external module scripts and CSS, images from the hub itself, no inline code,
+no CDN, no font download). The two components paint themselves with constructable stylesheets
+(`adoptedStyleSheets`), which `style-src 'self'` allows; an inline `<style>` in their shadow root would be blocked.
+
+Port. The hub defaults to 8765, which is also the port the lantern-avatar sheet is usually served on
+(`python -m http.server 8765` in that folder). Set `[hub].port` in `jarvis.local.toml` (this machine uses 8791)
+so `face-window.cmd`, which reads the same config, opens the hub and not the sheet server.
+
+State mapping. The page fetches `/api/status` every 5 seconds and picks the first row that matches:
+
+| Avatar state | When |
+|---|---|
+| sad | the kill file is present, the daemon is paused, or the breaker is not closed (the daemon is disabled) |
+| thinking | a job is in `queue/running` |
+| sad | the newest finished job (done or failed) failed |
+| sleepy | the daemon is not running (no fresh heartbeat) |
+| listening | at least one proposal is waiting in the Inbox (`status: proposed`), by day |
+| sleepy | between 23:00 and 07:00 local time, or nothing in the status has changed for 30 minutes while the daemon is otherwise idle |
+| idle | the daemon is healthy and quiet |
+
+A waiting proposal keeps the avatar listening however long it waits (the 30 minute rule only replaces idle), and
+at night sleepy replaces both idle and listening. When the newest finished job is a new, successful one since the
+previous poll, the avatar reacts happy for 2 seconds on top of whatever state it settles into (the first poll
+after the page opens never reacts). If the poll fails, the avatar is confused and the label says the hub cannot
+be reached; it recovers on the next good poll.
+
+The two facts the CLI status does not carry are added to `/api/status` under `face`: `inbox_pending` (count of
+proposals still `proposed`) and `last_finished` (`id`, `state` and `at` of the newest job in `queue/done` or
+`queue/failed`, from the three newest files of each, so the cost does not grow with the queue). The `jarvis
+status` output is unchanged. The mapping is a pure function, `mapState` in `jarvisd/hub/face.py`, and
+`tests/test_hub_face.py` runs it under node.
+
 ## Reaching it from a phone
 
 Keep the hub on loopback and let Tailscale proxy to it:
@@ -293,6 +342,7 @@ Restart `jarvis hub` after changing it. Bare host names only: no scheme, port or
 | `audit_rows` | 50 | rows on the Audit view |
 | `allowed_hosts` | none | extra `Host` names, see above |
 | `stale_days` | 14 | Projects view: stale badge once a repository shows no commit or uncommitted change in the digest notes for this many days (1 to 365) |
+| `face_dir` | `~/lantern-avatar` | folder the `/face` page serves the avatar from, see "The face" |
 | `task_projects` | none | Projects view: repository name to keywords that tie the active task to it; set it in `jarvis.local.toml` |
 
 `[tracker]` and `[propose]` have their own tables, see "Where a confirmed proposal goes" and [proposals](proposals.md).
