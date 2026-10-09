@@ -29,9 +29,10 @@ jarvis hub --check         # render every view once against the real state, then
   authentication, TLS. The page has no login because it listens on loopback only.
 - **Tested against fakes only:** the ClickUp adapter has never talked to the real ClickUp service,
   only to a local stand-in server. Use `dry_run` first (below).
-- **Not verified on a real second device:** the `tailscale serve` steps below were written
-  from the Tailscale documentation and have not been run against this application. Check
-  the flags with `tailscale serve --help`.
+- **Verified through the tailnet name from the same machine, not yet from a phone:** the
+  `tailscale serve` steps below were run on 2026-10-09 (Tailscale 1.102) and `/face` answered 200
+  at `https://<machine>.<tailnet>.ts.net/` with the name listed in `allowed_hosts`. A second
+  device has not opened it yet.
 - **Not looked at in a browser by the author of the tests.** The tests prove the HTML,
   headers and data; they cannot prove the layout looks right. Open it once.
 
@@ -267,9 +268,10 @@ Behaviour worth knowing before the first real send:
 
 `/face` is the avatar's home: one `<lantern-puppet>` (the paper-lantern character from the `lantern-avatar`
 project) filling the window on a dark page, with its current state written underneath. It is meant for a small
-always-on window next to your work: `binace-window.cmd` opens it in an app-mode Edge (Chrome if Edge is
+always-on window next to your work: `bin/face-window.cmd` opens it in an app-mode Edge (Chrome if Edge is
 missing) of 420 by 460 pixels, on the port in `[hub].port` (falling back to 8765, or pass a port as the first
-argument). The hub has to be running (`jarvis hub`).
+argument). The hub has to be running (`jarvis hub`, or `bin/hub.cmd` once, which starts it). The "JARVIS
+Face" shortcut from `deploy/make-shortcuts.ps1` runs this launcher.
 
 Where the files come from. `[hub].face_dir` (default `~/lantern-avatar`) is read, never written, and only these
 names are served under `/static/face/`: `lantern.js`, `lantern-puppet.js`, `body/poses.json` and `body/<name>.png`
@@ -311,13 +313,40 @@ proposals still `proposed`) and `last_finished` (`id`, `state` and `at` of the n
 status` output is unchanged. The mapping is a pure function, `mapState` in `jarvisd/hub/face.py`, and
 `tests/test_hub_face.py` runs it under node.
 
+## Opening it, keeping it running
+
+`bin/hub.cmd` opens the hub at `http://127.0.0.1:<port>/` in an app-mode window (Edge, or Chrome) of 1180 by
+820 pixels. When nothing listens on the port it starts the hub first: a scheduled task named JarvisHub when
+one is registered, else `pythonw -m jarvisd hub` detached from the window, and it waits up to 20 seconds for
+the port before opening the browser. The port is `[hub].port` read the way the CLI reads it, or the first
+argument. Under pythonw the hub's own output goes nowhere; a crash lands in `logs/jarvisd-crash.log` like
+the daemon's, and a port already taken (another hub, the lantern-avatar sheet server on 8765) ends the
+process with exit code 1, so give the hub its own port in `jarvis.local.toml`.
+
+`deploy/make-shortcuts.ps1` writes two shortcuts, "JARVIS Hub" (`bin/hub.cmd`) and "JARVIS Face"
+(`bin/face-window.cmd`), on the Desktop and under Start menu, Programs, JARVIS, with the lantern icon
+`bin/jarvis.ico` and the launcher window minimised. `-Remove` deletes them.
+
+A hub started this way lives until logout or reboot. To have it back at every logon, register a task named
+JarvisHub on the model of `deploy/register-jarvisd-task.ps1`: same user, Interactive logon, RunLevel Limited,
+no time limit, restart on failure, logon trigger only, and the action `pythonw -m jarvisd hub` in the
+checkout. `bin/hub.cmd` runs that task by name when it exists. The kill switch does not know this task on
+purpose: the hub reads state and writes nothing outside the Inbox decisions, so it may stay up while the
+daemon is stopped (the face then shows the daemon as sad or sleepy).
+
 ## Reaching it from a phone
 
-Keep the hub on loopback and let Tailscale proxy to it:
+Keep the hub on loopback and let Tailscale proxy to it, on the port the hub listens on (`[hub].port`,
+8765 by default):
 
 ```
 tailscale serve --bg 8765
 ```
+
+`tailscale serve status` shows the mapping; it survives reboots and keeps pointing at the old port after a
+`[hub].port` change, so run `tailscale serve reset` and the command above again with the new port. The hub
+has to be alive for the proxy to answer, and a device sees it only while it is on the tailnet; `serve` never
+publishes to the internet (that would be `tailscale funnel`, which the hub is not written for).
 
 Tailscale forwards the tailnet name in the `Host` header, so the hub refuses it until you
 list the name. That name is private, so it goes in `jarvis.local.toml`, never in the tracked

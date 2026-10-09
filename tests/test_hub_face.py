@@ -167,6 +167,15 @@ def test_launcher_opens_an_app_window_on_the_configured_port() -> None:
     assert "127.0.0.1" in text and "/face" in text
 
 
+def test_hub_launcher_starts_the_hub_then_opens_an_app_window() -> None:
+    text = (ROOT / "bin" / "hub.cmd").read_text(encoding="utf-8")
+    assert "--app=" in text and "msedge" in text and "chrome" in text and "127.0.0.1" in text
+    assert "JarvisHub" in text and "-m jarvisd hub" in text and "LISTENING" in text
+    shortcuts = (ROOT / "deploy" / "make-shortcuts.ps1").read_text(encoding="utf-8")
+    assert "hub.cmd" in shortcuts and "face-window.cmd" in shortcuts and "jarvis.ico" in shortcuts
+    assert (ROOT / "bin" / "jarvis.ico").read_bytes()[:4] == b"\x00\x00\x01\x00"
+
+
 # --- the state mapping, run under node ---------------------------------------------------------------
 
 
