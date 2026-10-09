@@ -168,6 +168,38 @@ footer {
   color: var(--muted);
   font-size: 0.85rem;
 }
+/* The avatar companion (views.page with face=True). A rail centred in the right margin while the margin
+   holds it (viewport 88rem and up: 64rem of content plus two margins of 12rem), a 2.75rem dock at the
+   right of the header below that, where it takes the place of the daemon pill. Fixed, so it never
+   scrolls away and the page refresh (which swaps <main> only) never touches it. */
+.companion {
+  position: fixed;
+  z-index: 3;
+  top: 5.5rem;
+  right: max(16px, calc((100vw - 64rem) / 4 - 4.5rem));
+  width: 10rem;
+  display: grid;
+  justify-items: center;
+  gap: 0.2rem;
+}
+.companion a { display: block; width: 10rem; height: 10rem; border-radius: 50%; }
+.companion a:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.companion lantern-puppet { display: block; width: 100%; height: 100%; }
+.companion .label {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  text-transform: lowercase;
+  text-align: center;
+}
+@media (max-width: 87.99rem) {
+  .companion { top: 0.2rem; right: 16px; width: auto; }
+  .companion a { width: 2.75rem; height: 2.75rem; }
+  .companion .label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  body[data-face] .bar { padding-right: 3.25rem; }
+  body[data-face] .bar .pill { display: none; }
+}
 @media (max-width: 40rem) {
   body { font-size: 15px; }
   h1 { font-size: 1.3rem; }

@@ -62,7 +62,11 @@ def table(headers: list[tuple[str, str]], rows: list[list[str]], row_class: str 
     return f'<div class="scroll"><table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>'
 
 
-def page(title: str, active: str, content: str, *, flags: dict[str, Any], refresh_s: int) -> str:
+def page(title: str, active: str, content: str, *, flags: dict[str, Any], refresh_s: int,
+         face: bool = False) -> str:
+    """`face` adds the avatar companion and its two module scripts; the caller says whether the assets exist."""
+    from jarvisd.hub import face as face_mod  # L3 sibling; imported here to keep this module's head free of it
+
     nav = "".join(
         f'<a href="{href}"' + (' aria-current="page"' if label == active else "") + f">{label}</a>"
         for href, label in NAV)
@@ -80,19 +84,22 @@ def page(title: str, active: str, content: str, *, flags: dict[str, Any], refres
         reason = esc(flags["pause"].get("reason") or "no reason given")
         banners += f'<div class="banner warn" role="status">Paused: {reason}. Run <code>jarvis resume</code>.</div>'
     script = '<script src="/static/hub.js"></script>' if refresh_s else ""
+    companion = face_mod.COMPANION if face else ""
+    face_attr = ' data-face="1"' if face else ""
+    face_scripts = face_mod.SCRIPT_TAGS if face else ""
     return (
         '<!doctype html>\n<html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<meta name="color-scheme" content="light dark">'
         f"<title>{esc(title)} - JARVIS hub</title>"
         '<link rel="stylesheet" href="/static/hub.css"></head>'
-        f'<body data-refresh="{int(refresh_s)}">'
+        f'<body data-refresh="{int(refresh_s)}"{face_attr}>'
         '<header class="top"><div class="bar"><span class="brand">JARVIS hub</span>'
-        f'<nav aria-label="Views">{nav}</nav>{live}</div></header>'
+        f'<nav aria-label="Views">{nav}</nav>{live}</div></header>{companion}'
         f'<main id="main">{banners}{content}</main>'
         '<footer>Read-only cockpit: it reads state, queue, audit and the digest notes and never calls Claude. '
         'The one thing it writes is a decision you click in the Inbox. <span id="stamp"></span></footer>'
-        f"{script}</body></html>\n")
+        f"{script}{face_scripts}</body></html>\n")
 
 
 def counts_text(counts: dict[str, Any]) -> str:

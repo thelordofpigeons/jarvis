@@ -43,6 +43,20 @@ def _client(cfg: Config, host: str = HOST) -> TestClient:
     return TestClient(hub_app.create_app(cfg), base_url=host)
 
 
+def test_every_hub_view_carries_the_face_companion_when_the_assets_exist(face_cfg: Config, tmp_path: Path) -> None:
+    body = _client(face_cfg).get("/status").text
+    assert 'data-face="1"' in body and '<aside class="companion"' in body and 'id="avatar"' in body
+    assert 'href="/face"' in body and 'id="state"' in body
+    assert face.SCRIPT_TAGS in body and '<script src="/static/hub.js">' in body
+    # outside <main>, so the refresh script (which swaps <main> only) leaves the avatar alone
+    assert body.index("</header>") < body.index('<aside class="companion"') < body.index('<main id="main">')
+    assert not re.search(r"<script(?![^>]*\bsrc=)", body) and "style=" not in body.split("<main")[0]
+    without = face_cfg.model_copy(deep=True)
+    without.hub.face_dir = tmp_path / "nowhere"
+    plain = _client(without).get("/status").text
+    assert "companion" not in plain and "lantern" not in plain and "data-face" not in plain
+
+
 def test_face_page_has_the_puppet_and_only_external_code(face_cfg: Config) -> None:
     resp = _client(face_cfg).get("/face")
     assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/html")

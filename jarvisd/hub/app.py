@@ -102,7 +102,8 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port
 
     def render(title: str, active: str, content: str, code: int = 200, *, live: bool = True) -> HTMLResponse:
         # live=False drops the auto refresh: a re-fetch of the Inbox would wipe a half-typed edit.
-        return HTMLResponse(views.page(title, active, content, flags=data.flags(), refresh_s=refresh if live else 0),
+        return HTMLResponse(views.page(title, active, content, flags=data.flags(), refresh_s=refresh if live else 0,
+                                       face=face.installed(cfg.hub.face_dir)),
                             status_code=code)
 
     @app.middleware("http")

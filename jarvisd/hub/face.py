@@ -18,6 +18,17 @@ MEDIA_TYPES = {".js": "text/javascript; charset=utf-8", ".json": "application/js
 MAX_ASSET_BYTES = 8_000_000
 REQUIRED = ("lantern.js", "lantern-puppet.js")
 
+# One puppet, calibrated once: the default body and where its face sits (lantern-avatar/body/f01.png).
+PUPPET_TAG = ('<lantern-puppet id="avatar" src="/static/face/body/f01.png" face-x="514" face-y="470" radius="300" '
+              'poses="/static/face/body/poses.json"></lantern-puppet>')
+SCRIPT_TAGS = ('<script type="module" src="/static/face/lantern-puppet.js"></script>'
+               '<script type="module" src="/static/face.js"></script>')
+# The companion on every hub view: a rail in the right margin on a wide screen, a dock in the header
+# below that (hub.css .companion). Outside <main>, so the page refresh never swaps it out. The link
+# opens /face, the avatar's own page, for a second window or a phone.
+COMPANION = ('<aside class="companion" aria-label="JARVIS face"><a href="/face" title="Open the face on its own">'
+             + PUPPET_TAG + '</a><p id="state" class="label" role="status" aria-live="polite">idle</p></aside>')
+
 
 def installed(face_dir: Path) -> bool:
     try:
@@ -48,7 +59,7 @@ def media_type(path: Path) -> str:
     return MEDIA_TYPES.get(path.suffix.lower(), "application/octet-stream")
 
 
-PAGE = """\
+PAGE = f"""\
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -56,11 +67,10 @@ PAGE = """\
 <link rel="stylesheet" href="/static/face.css"></head>
 <body>
 <main class="stage">
-<lantern-puppet id="avatar" src="/static/face/body/f01.png" face-x="514" face-y="470" radius="300" poses="/static/face/body/poses.json"></lantern-puppet>
+{PUPPET_TAG}
 <p id="state" class="label" role="status" aria-live="polite">idle</p>
 </main>
-<script type="module" src="/static/face/lantern-puppet.js"></script>
-<script type="module" src="/static/face.js"></script>
+{SCRIPT_TAGS}
 </body></html>
 """
 

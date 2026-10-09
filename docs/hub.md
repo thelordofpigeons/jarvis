@@ -273,6 +273,12 @@ missing) of 420 by 460 pixels, on the port in `[hub].port` (falling back to 8765
 argument). The hub has to be running (`jarvis hub`, or `bin/hub.cmd` once, which starts it). The "JARVIS
 Face" shortcut from `deploy/make-shortcuts.ps1` runs this launcher.
 
+The same puppet is also on every hub view, as the companion: on a wide screen (88rem and up) a 10rem lantern
+with its state under it, fixed in the right margin next to whatever you are reading; below that a 2.75rem
+lantern docked at the right of the header, where it replaces the daemon pill (the state is still read out
+to assistive tech). It sits outside `<main>`, so the page refresh never resets it, and clicking it opens
+`/face`. The companion appears only when the assets are installed; otherwise the views are as before.
+
 Where the files come from. `[hub].face_dir` (default `~/lantern-avatar`) is read, never written, and only these
 names are served under `/static/face/`: `lantern.js`, `lantern-puppet.js`, `body/poses.json` and `body/<name>.png`
 (letters, digits, dot, dash and underscore; no sub-folders). Anything else, a `..` in any spelling, a backslash, a
