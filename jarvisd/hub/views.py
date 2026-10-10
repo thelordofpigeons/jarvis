@@ -19,8 +19,8 @@ import re
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from jarvisd.common import parse_iso
-from jarvisd.hub.digestparse import counts_of, still_open_groups
+from jarvisd.common import norm_key, parse_iso
+from jarvisd.hub.digestparse import WEEKLY_HEADINGS, WEEKLY_SECTIONS, counts_of, still_open_groups
 from jarvisd.hub.mdhtml import render_markdown
 
 NAV = (("/", "Today"), ("/inbox", "Inbox"), ("/projects", "Projects"), ("/activity", "Activity"))
@@ -58,6 +58,12 @@ TASK_RESULTS = {0: "ok", 1: "script error", 267009: "still running", 267011: "ne
                 2147946720: "refused by the operator or administrator"}
 ATTENTION_PILL = {"CI failing": "bad", "Job failed": "bad", "Daemon crashed": "bad", "Unclean exit": "warn",
                   "Task overdue": "bad", "Backlog held": "warn", "Breaker open": "bad", "Config invalid": "bad"}
+# `jarvis wrong --should X`, as the Activity "Flagged wrong" list says it.
+SHOULD_LABELS = {"escalate": "should have been escalated", "hold": "should have been held back",
+                 "skip": "should have been skipped", "other": "another kind of mistake"}
+# The Snooze choices of contract section 7: form value, button label.
+SNOOZE_CHOICES = (("tomorrow", "Tomorrow"), ("3d", "3 days"), ("monday", "Monday"))
+ATTENTION_FLASH = {"done": "Done.", "snoozed": "Snoozed"}
 
 
 def esc(value: object) -> str:
@@ -192,7 +198,8 @@ def page(title: str, active: str, content: str, *, flags: dict[str, Any], refres
         f'<nav aria-label="Views">{nav}</nav>{strip_markup}</div></header>{companion}'
         f'<main id="main">{banners}{content}</main>'
         '<footer>Read-only cockpit: it reads state, queue, audit and the digest notes and never calls Claude. '
-        'The one thing it writes is a decision you click in the Inbox. <span id="stamp"></span></footer>'
+        'The only things it writes are the decisions you click: Confirm, Edit and Reject in the Inbox, Done and Snooze '
+        'on Today. <span id="stamp"></span></footer>'
         f'<script src="/static/prefs.js"></script>{script}{face_scripts}</body></html>\n')
 
 
@@ -231,6 +238,32 @@ def _safe_href(url: str) -> str | None:
 def _li(text: str, item_id: str | None = None, cls: str = "") -> str:
     attrs = (f' data-id="{esc(item_id)}"' if item_id else "") + (f' class="{cls}"' if cls else "")
     return f"<li{attrs}>{text}</li>"
+
+
+def item_key(keys: dict[str, str], item_id: str | None, text: str) -> str:
+    """A line's stable key: the sidecar's when the id is there, else the normalised text, so seen marks still work on a
+    note written before the sidecar existed. Only the buttons need the sidecar."""
+    return keys.get(item_id or "", "") or norm_key(text)
+
+
+def _actions(item_id: str, token: str) -> str:
+    """Done and Snooze for one item line (contract section 7). The snooze `<details>` has no id, so prefs.js leaves
+    it alone; the date input and the three buttons share the `until` name, the first non-empty value wins."""
+    base = f"/today/{esc(item_id)}"
+    choices = "".join(f'<button name="until" value="{v}">{label_}</button>' for v, label_ in SNOOZE_CHOICES)
+    return (f'<span class="act"><form method="post" action="{base}/done" class="inline">{_csrf(token)}'
+            '<button type="submit">Done</button></form>'
+            f'<details class="snooze"><summary>Snooze</summary><form method="post" action="{base}/snooze" class="inline">'
+            f'{_csrf(token)}{choices}<input type="date" name="until" aria-label="Snooze until a date">'
+            '<button type="submit">Pick</button></form></details></span>')
+
+
+def item_li(text_html: str, key: str, item_id: str | None, token: str, *, decidable: bool) -> str:
+    """One Needs you or Still open line: the key and the id in data attributes, the text in `.t`, the actions in `.act`
+    when the id is in the latest sidecar."""
+    attrs = f' data-key="{esc(key)}"' + (f' data-id="{esc(item_id)}"' if item_id else "")
+    act = _actions(item_id, token) if (decidable and item_id) else ""
+    return f'<li{attrs}><span class="t">{text_html}</span>{act}</li>'
 
 
 def _raw_lines(lines: list[str]) -> str:
@@ -284,14 +317,45 @@ def _attention_text(a: dict[str, Any]) -> str:
     return f'<a class="tap" href="/projects#{esc(repo_anchor(name))}">{esc(name)}</a>{esc(rest)}'
 
 
+def attention_flash(code: str, item_id: str, decisions_by_id: dict[str, dict[str, Any]]) -> str:
+    """The banner after Done or Snooze. The query only picks which banner; the date comes from the stored decision,
+    and a code that does not match a decision on disk shows nothing."""
+    rec = decisions_by_id.get(item_id)
+    if rec is None or code not in ATTENTION_FLASH:
+        return ""
+    if code == "done" and rec["action"] == "done":
+        text = "Done. The line leaves the page now and the next digest."
+    elif code == "snoozed" and rec["action"] == "snooze" and rec.get("until"):
+        text = f"Snoozed until {esc(rec['until'])}. The line returns that day unless its text changes first."
+    else:
+        return ""
+    return f'<div class="banner ok" role="status">{text}</div>'
+
+
 def today(model: dict[str, Any], token: str, today_date: Any, flash: str = "") -> str:
     note, parsed = model["note"], model["parsed"]
     if note is None or parsed is None:
-        return ('<h1>Today</h1>' + flash + '<p class="empty">No digest note found yet. The daemon writes one each morning; '
+        return ('<section id="today" data-digest=""><h1>Today</h1>' + flash
+                + '<p class="empty">No digest note found yet. The daemon writes one each morning; '
                 "<code>jarvis run-digest --dry-run</code> shows what it would contain without writing.</p>"
-                '<p class="end">That\'s all.</p>')
+                '<p class="end">That\'s all.</p></section>')
     counts = parsed["counts"]
-    out = ["<h1>Today</h1>", flash,
+    keys: dict[str, str] = model.get("keys", {})
+    decided: dict[str, Any] = model.get("decided", {})
+    hidden = 0
+
+    def shown(item_id: str | None, text: str) -> bool:
+        # A line whose key carries a decision in force is gone at once; the next digest makes it permanent.
+        nonlocal hidden
+        if item_key(keys, item_id, text) in decided:
+            hidden += 1
+            return False
+        return True
+
+    def line(text_html: str, text: str, item_id: str | None) -> str:
+        return item_li(text_html, item_key(keys, item_id, text), item_id, token, decidable=item_id in keys)
+
+    out = [f'<section id="today" data-digest="{esc(model.get("digest_id") or note["job_id"])}">', "<h1>Today</h1>", flash,
            f'<p class="lede">Digest of {esc(parsed["date"] or note["job_id"])}: {counts["collected"]} collected, '
            f'{counts["cleared"]} summarised, {counts["held"]} held.</p>']
     # 1. Attention
@@ -309,8 +373,11 @@ def today(model: dict[str, Any], token: str, today_date: Any, flash: str = "") -
     out.append("<h2>Needs you</h2>")
     if parsed["headline"]:
         out.append(f'<p class="lede">{esc(parsed["headline"])}</p>')
-    if parsed["start_here"]:
-        out.append('<ol class="needs">' + "".join(_li(esc(s["text"]), s["id"]) for s in parsed["start_here"]) + "</ol>")
+    needs = [s for s in parsed["start_here"] if shown(s["id"], s["text"])]
+    if needs:
+        out.append('<ol class="needs">' + "".join(line(esc(s["text"]), s["text"], s["id"]) for s in needs) + "</ol>")
+    elif parsed["start_here"]:
+        out.append('<p class="empty">Every ranked line is done or snoozed.</p>')
     elif "start_here" in parsed["missing"]:
         out.append('<p class="empty">This note has no Start here section.</p>')
     else:
@@ -334,10 +401,24 @@ def today(model: dict[str, Any], token: str, today_date: Any, flash: str = "") -
     out.append("<h2>Changed since yesterday</h2>")
     delta = model["delta"]
     changes = [f"<li><b>{esc(name)}</b>: {esc(', '.join(bits))}</li>" for name, bits in delta["repos"].items()]
-    changes += [f"<li>{esc(line)}</li>" for line in delta["lines"]]
+    changes += [f"<li>{esc(ln)}</li>" for ln in delta["lines"]]
+    for s in model.get("since", []):  # contract 6.2: the four thread lines, each with its texts from the history
+        texts = ('<ul class="since">' + "".join(f"<li>{esc(t)}</li>" for t in s["texts"]) + "</ul>") if s["texts"] else ""
+        changes.append(f'<li class="since-{esc(s["kind"])}">{esc(plural(s["n"], s["word"]))}{texts}</li>')
     out.append(f'<ul class="rows">{"".join(changes)}</ul>' if changes else '<p class="empty">Nothing changed.</p>')
-    # 5. Everything else
+    # 5. Everything else (the Still open lines are built first, so the decided count is known when the block opens)
+    still_open_html: list[str] = []
+    groups = still_open_groups(parsed)
+    for name, rows in groups:
+        rows = [r for r in rows if shown(r["id"], r["text"])]
+        if not rows:
+            continue
+        still_open_html.append(f'<h4>{esc(name)}</h4><ul class="rows">' + "".join(
+            line(esc(r["text"]) + (f' <span class="age">{r["age"]} days old</span>' if r.get("age") else ""), r["text"], r["id"])
+            for r in rows) + "</ul>")
     out.append('<details id="else"><summary>Everything else</summary>')
+    if hidden:
+        out.append(f'<p class="lede decided">{plural(hidden, "line")} decided, applied at the next digest.</p>')
     task = parsed["active_task"]
     out.append("<h3>Active task</h3>")
     if task:
@@ -348,14 +429,12 @@ def today(model: dict[str, Any], token: str, today_date: Any, flash: str = "") -
         out.append(f'<p class="empty">{esc(parsed["active_task_text"] or "No active task recorded.")}</p>')
     out.append(_raw_lines(parsed["other"].get("active_task", [])))
     out.append("<h3>Still open</h3>")
-    groups = still_open_groups(parsed)
-    if groups:
-        for name, rows in groups:
-            out.append(f'<h4>{esc(name)}</h4><ul class="rows">' + "".join(
-                _li(esc(r["text"]) + (f' <span class="age">{r["age"]} days old</span>' if r.get("age") else ""), r["id"])
-                for r in rows) + "</ul>")
+    if still_open_html:
+        out.extend(still_open_html)
         if parsed["still_open_hidden"]:
             out.append(f'<p class="empty">{parsed["still_open_hidden"]} more open threads not shown (cap 10).</p>')
+    elif groups:
+        out.append('<p class="empty">Every open thread is done or snoozed.</p>')
     else:
         out.append('<p class="empty">No open threads.</p>')
     out.append(_raw_lines(parsed["other"].get("still_open", [])))
@@ -391,7 +470,7 @@ def today(model: dict[str, Any], token: str, today_date: Any, flash: str = "") -
         out.append('<p class="empty">No ranked items in this note.</p>')
     out.append("</details>")
     # 8. The end
-    out.append('<p class="end">That\'s all.</p>')
+    out.append('<p class="end">That\'s all.</p></section>')
     return "".join(out)
 
 
@@ -561,6 +640,56 @@ def _tile(name: str, value: object, kind: str = "") -> str:
     return f'<div class="tile {kind}"><dt>{esc(name)}</dt><dd>{esc(value)}</dd></div>'
 
 
+def _flagged_li(ts: str, item_id: str, should: str, leak: bool) -> str:
+    """One flagged-wrong row, from the audit or from the weekly note, in the label map's words."""
+    words = SHOULD_LABELS.get(should, f"should {should}" if should else "no reason recorded")
+    return (f"<li>{esc(ts)}: <code>{esc(item_id)}</code>, {esc(words)}" + (f" {pill('leak', 'bad')}" if leak else "") + "</li>")
+
+
+def _week_block(model: dict[str, Any]) -> str:
+    """`<details id="week">` This week (contract section 9): the weekly note's sections, then Flagged wrong from the
+    audit's `correction` events of the last 7 days, which is there even before the first weekly note."""
+    week = model.get("week")
+    out = ['<details id="week"><summary>This week</summary>']
+    if week is None:
+        out.append('<p class="empty">No weekly note yet. The digest writer files one on the first run of a new week '
+                   "(<code>jarvis weekly</code> writes it by hand).</p>")
+    else:
+        c = week["counts"]
+        facts = [f"{plural(c['runs'], 'run')}" if c.get("runs") is not None else "",
+                 f"{c['failed']} failed" if c.get("failed") is not None else "",
+                 f"{esc(usd(week['cost_usd']))} USD of Claude calls" if week.get("cost_usd") else ""]
+        span = f" ({esc(week['from'])} to {esc(week['to'])})" if week.get("from") and week.get("to") else ""
+        out.append(f'<p class="lede">Week {esc(week["week"] or week.get("name", ""))}{span}: '
+                   f'{esc(", ".join(f for f in facts if f))}.</p>')
+        for key in WEEKLY_SECTIONS:
+            if key == "flagged":
+                continue  # the live list below covers it
+            sec = week["sections"][key]
+            out.append(f"<h3>{esc(WEEKLY_HEADINGS[key])}</h3>")
+            if sec["rows"]:
+                out.append('<ul class="rows">' + "".join(_li(esc(r["text"]), r["id"]) for r in sec["rows"]) + "</ul>")
+            elif not sec["other"]:
+                out.append('<p class="empty">None.</p>')
+            out.append(_raw_lines(sec["other"]))
+    out.append("<h3>Flagged wrong</h3>")
+    flagged = model.get("flagged") or []
+    note_rows = week["sections"]["flagged"]["rows"] if week else []
+    if flagged:
+        out.append('<p class="lede">Corrections recorded with <code>jarvis wrong</code> in the last 7 days; the id and '
+                   "what the gate should have done, never the note.</p>")
+        out.append('<ul class="rows">' + "".join(_flagged_li(fmt_ts(f["ts"]), f["item_id"], f["should"], f["leak"]) for f in flagged)
+                   + "</ul>")
+    elif note_rows:
+        out.append('<p class="lede">From the weekly note (the audit holds no correction in the last 7 days).</p>')
+        out.append('<ul class="rows">' + "".join(
+            _flagged_li(r["fields"]["ts"], r["fields"]["id"], r["fields"]["should"], r["leak"]) for r in note_rows) + "</ul>")
+    else:
+        out.append('<p class="empty">Nothing flagged wrong in the last 7 days.</p>')
+    out.append("</details>")
+    return "".join(out)
+
+
 def _status_facts(status: dict[str, Any]) -> str:
     """The daemon status as a definition list in plain words (the label map), one entry per fact."""
     breaker = status.get("breaker") or {}
@@ -612,6 +741,7 @@ def activity(model: dict[str, Any]) -> str:
                f"<p>Budget today ({esc(budget['date'])}): {esc(usd(budget['spent_usd']))} of {esc(budget['daily_budget_usd'])} USD "
                f"spent, {esc(budget['calls'])} of {esc(budget['daily_calls'])} calls, {esc(usd(budget['reserved_usd']))} reserved. "
                f"The audit log sums {esc(usd(model['cost_today']))} USD of Claude calls today.</p></div>")
+    out.append(_week_block(model))
     out.append("<h2>Records</h2>")
     out.append(f'<details id="runs"><summary>Digest runs ({len(model["runs"])})</summary>'
                '<p class="lede">One row per digest job, newest first. The witness is the audit record the run pointed at when '

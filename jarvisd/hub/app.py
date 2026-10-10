@@ -7,17 +7,19 @@ Boundaries, all enforced here and tested:
 - A Host header that is not loopback or listed in [hub].allowed_hosts gets 403. That stops a
   web page on another origin from reading the hub through DNS rebinding.
 - /face serves an allowlisted set of files from [hub].face_dir (jarvisd/hub/face.py); nothing else of that folder.
-- Everything is GET except POST /inbox/{id}/confirm, /edit and /reject; any other method gets 405 from the
-  router. Those three read a small urlencoded body, and only after three checks: the Host guard above, an
-  Origin that is absent or names the very host (and port) the request arrived on, and the per-process CSRF token
-  (secrets.token_urlsafe, made when the app is built, sent in a hidden field, compared in constant time). The Host
-  header was already checked against the allowlist, so "Origin equals Host" lets http://localhost:<port> and a
-  `tailscale serve` name decide, and still refuses any other site. A GET never changes anything.
+- Everything is GET except POST /inbox/{id}/confirm, /edit and /reject, and POST /today/{id}/done and /snooze; any
+  other method gets 405 from the router. Those five read a small urlencoded body, and only after three checks: the
+  Host guard above, an Origin that is absent or names the very host (and port) the request arrived on, and the
+  per-process CSRF token (secrets.token_urlsafe, made when the app is built, sent in a hidden field, compared in
+  constant time). The Host header was already checked against the allowlist, so "Origin equals Host" lets
+  http://localhost:<port> and a `tailscale serve` name decide, and still refuses any other site. A GET never
+  changes anything.
 - The old routes (/runs, /ledger, /held, /audit, /status, /repos, /reminders) answer 301 to the view that absorbed
   them, query string dropped, so bookmarks survive and nothing else is served there.
 - No CDN: the interactive API docs are switched off, CSS and JS are served from /static/.
 - The hub never calls Claude. Its data layer (jarvisd/hub/data.py) only reads; the only writes are the Inbox
-  decisions, made by jarvisd/inbox.py, the same functions `jarvis proposals confirm|reject` uses.
+  decisions, made by jarvisd/inbox.py, the same functions `jarvis proposals confirm|reject` uses, and the Today
+  decisions (Done, Snooze), made by jarvisd/attention.py into state/attention/ and nowhere else.
 
 Layer L3 (hub).
 """
@@ -37,7 +39,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse,
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from jarvisd import inbox
+from jarvisd import attention, inbox
 from jarvisd.config import Config
 from jarvisd.hub import inbox as inbox_view
 from jarvisd.hub import face, views
@@ -60,6 +62,8 @@ DECISION_STATUS = {"not_found": 404, "decided": 409, "busy": 409, "invalid": 422
                    "flagged": 422, "held": 422, "tracker_failed": 502, "maybe_created": 502, "unresolved": 409,
                    "save_failed": 500}
 MAX_FORM_FIELDS = 20
+# The same for a Today decision (Done, Snooze): a save failure is 502 there, as the contract says.
+ATTENTION_STATUS = {"not_found": 404, "decided": 409, "busy": 409, "invalid": 422, "save_failed": 502}
 # Where a decision may send the browser afterwards: the Inbox, or Today (its inline Confirm). Nothing else.
 NEXT_PAGES = frozenset({"/", "/inbox"})
 
@@ -128,16 +132,19 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port
         message = "Not found." if exc.status_code == 404 else "Method not allowed: the hub is read-only."
         return render("Error", "", views.not_found(exc.status_code, message), exc.status_code)
 
-    def flash_for(request: Request) -> str:
-        # The query only picks which banner to show; the banner text comes from the stored proposal.
+    def flash_for(request: Request, model: dict[str, Any] | None = None) -> str:
+        # The query only picks which banner to show; the banner text comes from the stored proposal or decision.
         code, pid = request.query_params.get("ok", ""), request.query_params.get("id", "")
         if code in inbox_view.FLASH and inbox.valid_id(pid):
             return inbox_view.flash_html(next((p for p in inbox_view.all_proposals(data) if p.id == pid), None), code)
+        if model is not None and code in views.ATTENTION_FLASH and attention.ITEM_ID.match(pid):
+            return views.attention_flash(code, pid, model["decisions_by_id"])
         return ""
 
     @app.get("/", response_class=HTMLResponse)
     def today_view(request: Request) -> HTMLResponse:
-        return render("Today", "Today", views.today(data.today(), csrf_token, data.now().date(), flash=flash_for(request)))
+        model = data.today()
+        return render("Today", "Today", views.today(model, csrf_token, data.now().date(), flash=flash_for(request, model)))
 
     @app.get("/inbox", response_class=HTMLResponse)
     def inbox_page(request: Request) -> HTMLResponse:
@@ -231,6 +238,33 @@ def create_app(cfg: Config, *, clock: Callable[[], datetime] | None = None, port
     async def inbox_reject(request: Request, proposal_id: str) -> Response:
         return await decide(request, proposal_id, "reject")
 
+    async def decide_item(request: Request, item_id: str, action: str) -> Response:
+        """Done or Snooze on a Today line (contract section 7): the Inbox guards in the Inbox order, then
+        jarvisd/attention.py writes one file under state/attention/ and audits the ids. The key is taken from the
+        latest note's sidecar, never from the form."""
+        fields = await form_fields(request)
+        if isinstance(fields, Response):
+            return fields
+        audit = inbox.audit_for(cfg, clock)
+        note = data.latest_digest()
+        job_id = note["job_id"] if note else None
+        result = await run_in_threadpool(
+            lambda: attention.decide(cfg.daemon.state_dir, audit, job_id, item_id, action, fields.get("until"), clock=clock))
+        if result.ok:
+            return RedirectResponse(f"/?ok={result.code}&id={item_id}", status_code=303)
+        model = data.today()
+        error = f'<div class="banner bad" role="alert">{views.esc(result.message)}</div>'
+        content = views.today(model, csrf_token, data.now().date(), flash=error)
+        return render("Today", "Today", content, ATTENTION_STATUS.get(result.code, 500))
+
+    @app.post("/today/{item_id}/done")
+    async def today_done(request: Request, item_id: str) -> Response:
+        return await decide_item(request, item_id, "done")
+
+    @app.post("/today/{item_id}/snooze")
+    async def today_snooze(request: Request, item_id: str) -> Response:
+        return await decide_item(request, item_id, "snooze")
+
     @app.get("/api/status")
     def status_json() -> Response:
         return Response(json.dumps(data.status(), indent=2, ensure_ascii=False, default=str),
@@ -279,7 +313,8 @@ def serve(cfg: Config, port: int, *, clock: Callable[[], datetime] | None = None
     """Run on 127.0.0.1 until interrupted. Exit code 0 after a clean stop, 1 if the port is taken."""
     import uvicorn
 
-    print(f"JARVIS hub on http://{LOOPBACK_HOST}:{port}/ (loopback only; the Inbox is its only write path). Stop with Ctrl+C.")
+    print(f"JARVIS hub on http://{LOOPBACK_HOST}:{port}/ (loopback only; the Inbox decisions and Done or Snooze on Today "
+          "are its only write paths). Stop with Ctrl+C.")
     print("From a phone: put `tailscale serve` in front of this port (docs/hub.md).")
     try:
         uvicorn.run(create_app(cfg, clock=clock, port=port), host=LOOPBACK_HOST, port=port, log_level="warning",

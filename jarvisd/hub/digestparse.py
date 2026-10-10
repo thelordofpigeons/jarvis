@@ -413,6 +413,80 @@ def parse_note(body: str, meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# --- the weekly review note (contract section 9) -------------------------------------------------------------------
+
+WEEKLY_SECTIONS = ("runs", "decided", "dropped", "snoozed", "flagged", "cost")
+_WEEKLY_DEFAULT = dict(zip(WEEKLY_SECTIONS, ("Runs", "Decided this week", "Dropped threads", "Snoozed and done",
+                                             "Flagged wrong", "Cost by day")))
+
+
+def _weekly_headings() -> dict[str, str]:
+    """The writer's six headings keyed by section name: a dict with these keys, or a tuple in the contract's order;
+    anything else (the writer side not landed yet) falls back to the contract's words."""
+    exported = getattr(_render, "WEEKLY_HEADINGS", None)
+    if isinstance(exported, dict) and set(exported) >= set(WEEKLY_SECTIONS):
+        return {k: str(exported[k]) for k in WEEKLY_SECTIONS}
+    if isinstance(exported, (tuple, list)) and len(exported) == len(WEEKLY_SECTIONS):
+        return dict(zip(WEEKLY_SECTIONS, (str(h) for h in exported)))
+    return dict(_WEEKLY_DEFAULT)
+
+
+WEEKLY_HEADINGS: dict[str, str] = _weekly_headings()
+_WEEKLY_NONE = "- None."
+_WEEKLY_LINES = {
+    "runs": re.compile(r"^- (?P<runs>\d+) runs?, (?P<failed>\d+) failed, \$(?P<usd>\d+\.\d{2}) Claude\.$"),
+    "decided": re.compile(r"^- (?P<date>\d{4}-\d{2}-\d{2}): (?P<text>[^\[]{3,200}) \[(?P<id>[0-9a-f]{8})\]$"),
+    "dropped": re.compile(r"^- (?P<text>[^\[]{3,200}) \((?P<first>\d{4}-\d{2}-\d{2}) to (?P<last>\d{4}-\d{2}-\d{2})\) "
+                          r"\[(?P<id>[0-9a-f]{8})\]$"),
+    "snoozed": re.compile(r"^- (?P<action>Done|Snoozed until \d{4}-\d{2}-\d{2}) (?P<date>\d{4}-\d{2}-\d{2}): "
+                          r"(?P<text>[^\[]{3,200}) \[(?P<id>[0-9a-f]{8})\]$"),
+    "flagged": re.compile(r"^- (?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}): (?P<id>[0-9a-f]{8}|w-[0-9a-f]{6}), "
+                          r"should (?P<should>escalate|hold|skip|other)(?P<leak>, leak)?\.$"),
+    "cost": re.compile(r"^- (?P<date>\d{4}-\d{2}-\d{2}): (?P<runs>\d+) runs?, \$(?P<usd>\d+\.\d{2})\.$"),
+}
+
+
+def parse_weekly(body: str, meta: dict[str, Any]) -> dict[str, Any]:
+    """The weekly note as data: the front matter scalars and, per section, the parsed rows (`fields` from the
+    contract's regex, `text` ready to show, `id` when the line carries one), the raw lines that matched no
+    pattern (`other`), and `present`. Same tolerance as `parse_note`: a missing heading is an empty section."""
+    sections: dict[str, dict[str, Any]] = {}
+    missing: list[str] = []
+    for key in WEEKLY_SECTIONS:
+        lines, present = _lines(body, WEEKLY_HEADINGS[key])
+        rows: list[dict[str, Any]] = []
+        other: list[str] = []
+        none = False
+        for line in lines:
+            if line == _WEEKLY_NONE:
+                none = True
+                continue
+            m = _WEEKLY_LINES[key].match(line)
+            if not m:
+                other.append(line[2:] if line.startswith("- ") else line)
+                continue
+            fields = m.groupdict()
+            row: dict[str, Any] = {"fields": fields, "id": fields.get("id"), "text": strip_id(line[2:])[0]}
+            if key == "flagged":
+                row["leak"] = bool(fields.get("leak"))
+                row["text"] = f"{fields['ts']}: {fields['id']}"
+            rows.append(row)
+        if not present:
+            missing.append(key)
+        sections[key] = {"rows": rows, "other": other, "none": none, "present": present}
+
+    def count(name: str) -> int | None:
+        try:
+            return int(str(meta.get(name, "")).strip())
+        except ValueError:
+            return None
+
+    return {"week": str(meta.get("week", "")), "from": str(meta.get("from", "")), "to": str(meta.get("to", "")),
+            "generated": str(meta.get("generated", "")), "cost_usd": str(meta.get("cost_usd", "")),
+            "counts": {k: count(f"n_{k}") for k in ("runs", "failed", "decided", "dropped", "done", "snoozed", "flagged")},
+            "sections": sections, "missing": missing, "type": str(meta.get("type", ""))}
+
+
 def still_open_groups(parsed: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]]]]:
     """Still open lines grouped by `group`, in first-seen order (the writer orders groups by newest item)."""
     groups: dict[str, list[dict[str, Any]]] = {}

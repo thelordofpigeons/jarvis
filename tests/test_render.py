@@ -39,6 +39,7 @@ FRONTMATTER_KEYS = [
     "window_end", "status", "late", "claude", "local_tier", "degraded", "cost_usd", "items",
     "grammar", "n_collected", "n_cleared", "n_held", "n_start_here", "n_attention", "n_still_open",
     "n_still_open_hidden", "n_decided", "n_repos_active", "n_repos_quiet", "n_system_anomalies",
+    "n_since_new", "n_since_resolved", "n_since_dropped", "n_since_returned",
     "sources", "audit_seq", "audit_head", "tags",
 ]
 

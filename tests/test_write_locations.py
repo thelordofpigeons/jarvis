@@ -227,3 +227,36 @@ def test_collector_read_scan_catches_the_obvious_bypasses() -> None:
     assert collector_read_findings("p.read_bytes()")
     assert collector_read_findings("io.open(p)")
     assert not collector_read_findings("os.scandir(d); p.stat(); safe_read_text(p, cfg, roots)")
+
+
+# --- the state paths of the item sidecar and history (docs/hub-rework-contract.md section 6) ------
+
+# The only file names the digest writer may spell under state/: everything sits in runs/<job>/, and the
+# history and the attention decisions are reached through StateStore.items, never by a literal path.
+DIGEST_STATE_FILES = frozenset({"summary.json", "run.json", "digest-unwritten.md", "items.json"})
+
+
+def _code_without_docstrings(source: str) -> str:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if isinstance(body, list) and body and isinstance(body[0], ast.Expr) \
+                and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+            del body[0]
+    return ast.unparse(tree)
+
+
+def test_digest_writer_names_only_the_contract_state_paths() -> None:
+    import re
+
+    from jarvisd import state
+
+    code = _code_without_docstrings((PKG / "digest.py").read_text(encoding="utf-8"))
+    names = set(re.findall(r"'([\w-]+\.(?:json|md|jsonl))'", code))
+    assert names == DIGEST_STATE_FILES, names
+    assert "item-history" not in code and '"attention"' not in code
+    assert state.ITEM_HISTORY_FILE == "item-history.json" and state.ATTENTION_DIR == "attention"
+    assert "state.py" in WRITERS and "digest.py" not in WRITERS and "weekly.py" not in WRITERS
+    weekly = (PKG / "weekly.py").read_text(encoding="utf-8")
+    assert write_findings(weekly) == [] and vault_attr_findings(weekly) == []
+    assert "write_raw" in weekly and "raw/jarvis" not in weekly.replace("`raw/jarvis/", "")

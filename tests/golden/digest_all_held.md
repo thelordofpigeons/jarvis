@@ -26,6 +26,10 @@ n_decided: 0
 n_repos_active: 0
 n_repos_quiet: 1
 n_system_anomalies: 0
+n_since_new: 0
+n_since_resolved: 0
+n_since_dropped: 0
+n_since_returned: 0
 sources: {brain: ok, task: ok, git: ok, system: ok, clickup: disabled, github: not_collected}
 audit_seq: 812
 audit_head: abababababababababababababababababababababababababababababababab

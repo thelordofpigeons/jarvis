@@ -215,10 +215,35 @@ ul.rows li, ul.raw li, ul.waiting li {
 }
 ul.rows li:last-child, ul.raw li:last-child, ul.waiting li:last-child { border-bottom: 0; }
 ul.raw li { color: var(--muted); font-size: 0.92rem; }
-ol.needs { padding-left: 1.6rem; margin: var(--space-1) 0; }
-ol.needs li { padding: var(--space-2) 0 var(--space-2) var(--space-1); border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+/* The numbers are a counter drawn inside the text span: a flex list item has no ::marker, and a separate flex
+   item for the number would take its own row on a phone. */
+ol.needs { list-style: none; counter-reset: needs; padding-left: 0; margin: var(--space-1) 0; }
+ol.needs li { counter-increment: needs; padding: var(--space-2) 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+ol.needs li .t::before { content: counter(needs) ". "; color: var(--accent); font-weight: 700; }
 ol.needs li:last-child { border-bottom: 0; }
-ol.needs li::marker { color: var(--accent); font-weight: 700; }
+/* Item lines (contract section 7): text, then Done and Snooze. One row at 1440; at 375 the text takes the full
+   width and the actions wrap under it. The opened snooze form wraps its own buttons so nothing overflows. */
+li[data-key] { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
+li[data-key] .t { flex: 1 1 20rem; min-width: 0; }
+li[data-key] .act { margin-left: auto; white-space: nowrap; display: inline-flex; align-items: center; gap: var(--space-1); }
+li[data-key] .act:has(details[open]) { flex: 1 1 100%; white-space: normal; flex-wrap: wrap; }
+.act form.inline { display: inline-flex; align-items: center; gap: var(--space-1); margin: 0; }
+.act button, .act input[type="date"] { min-height: 2rem; padding: 0 var(--space-2); font-size: 0.9rem; line-height: 1.2; }
+.act input[type="date"] { width: auto; }
+details.snooze { display: inline-block; margin: 0; }
+details.snooze > summary {
+  display: inline-flex; align-items: center; min-height: 2rem; padding: 0 var(--space-2); font-weight: 400; font-size: 0.9rem;
+  border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--panel); list-style: none;
+}
+details.snooze > summary::-webkit-details-marker { display: none; }
+details.snooze > summary:hover { border-color: var(--accent); color: var(--ink); }
+details.snooze[open] { display: block; flex: 1 1 100%; }
+details.snooze[open] > summary { border-color: var(--accent); margin-bottom: var(--space-1); }
+details.snooze[open] form.inline { display: flex; flex-wrap: wrap; white-space: normal; }
+.seen .t { opacity: 0.6; }
+ul.since { list-style: none; padding-left: var(--space-4); margin: var(--space-1) 0 0; color: var(--muted); font-size: 0.92rem; }
+ul.since li { padding: 0; border-bottom: 0; }
+p.decided { margin-top: var(--space-2); }
 ul.waiting li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2); }
 ul.waiting .title { flex: 1 1 14rem; }
 .age { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
@@ -313,6 +338,7 @@ footer {
   /* Touch: every control reaches 44 CSS px. Inline links that act (sort, waiting, note) carry `tap`. */
   nav a { padding: 0.55rem 0.9rem; min-height: var(--tap); display: inline-flex; align-items: center; }
   button, input[type="text"], input[type="date"], .actions details > summary { min-height: var(--tap); }
+  .act button, .act input[type="date"], details.snooze > summary { min-height: var(--tap); }
   .actions details > summary { display: inline-flex; align-items: center; }
   a.tap { display: inline-block; min-width: var(--tap); padding: var(--space-3) 0; }
   details > summary { padding: var(--space-3) 0; }
@@ -386,5 +412,40 @@ PREFS_JS = """\
   }, true);
   restore();
   document.addEventListener("hub:refreshed", restore);
+})();
+// Seen marks (contract section 8): which item keys were on the last digest you saw, in localStorage, keyed by
+// the digest id on <section id="today" data-digest>. The record rolls only when that id changes, so a reload or
+// the 30 s refresh of the same digest stores nothing; a line carried over from the previous digest gets `seen`.
+// No network, no cookie: the server never learns what was seen.
+(function () {
+  var key = "hub:seen";
+  function load() {
+    try { return JSON.parse(localStorage.getItem(key) || "null"); } catch (e) { return null; }
+  }
+  function save(state) {
+    try { localStorage.setItem(key, JSON.stringify(state)); } catch (e) { /* private window or storage off */ }
+  }
+  function mark() {
+    var today = document.getElementById("today");
+    if (!today) { return; }
+    var digest = today.getAttribute("data-digest") || "";
+    if (!digest) { return; }
+    var lines = today.querySelectorAll("[data-key]");
+    var keys = [];
+    for (var i = 0; i < lines.length; i++) { keys.push(lines[i].getAttribute("data-key")); }
+    var state = load();
+    if (!state || typeof state !== "object" || state.digest !== digest) {
+      state = { digest: digest, keys: keys, prev: (state && Array.isArray(state.keys)) ? state.keys : [] };
+      save(state);
+    }
+    var prev = {};
+    var before = Array.isArray(state.prev) ? state.prev : [];
+    for (var j = 0; j < before.length; j++) { prev[before[j]] = true; }
+    for (var k = 0; k < lines.length; k++) {
+      if (prev[lines[k].getAttribute("data-key")]) { lines[k].classList.add("seen"); }
+    }
+  }
+  mark();
+  document.addEventListener("hub:refreshed", mark);
 })();
 """

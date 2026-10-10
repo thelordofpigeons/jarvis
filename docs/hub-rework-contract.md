@@ -317,3 +317,156 @@ Must not change: the CSP and `test_security_headers`, `test_the_hub_never_writes
 `tests/test_write_locations.py`, the hub import ban and banned method names, the refresh rule (`hub.js`
 absent at `refresh_s = 0`), the CSS line bounds and `fetch(` in `hub.js`, `<main id="main">` and
 "read-only" on every view, `tests/test_digest_e2e.py`, `tests/test_repo_hygiene.py`, `tests/test_docs.py`.
+
+## 6. Item sidecar and history (writer side, phase 3)
+
+`jarvisd/digest.py` writes both files through `atomic_write_text` after `write_raw` succeeded, from the same
+`View` the sections used: a sensitive-held id is not in `View.visible`, so it cannot reach either file. The hub
+reads both and writes neither.
+
+**Sidecar** `state/runs/<job>/items.json`: `{"job_id", "date", "items": [...]}`, one record per rendered item
+line, in page order:
+
+```
+{"key": "rotate the pasted sandbox key before the demo tomorrow", "id": "c0ffee01", "section": "start_here",
+ "group": "notes", "date": "2026-10-08", "text": "Rotate the pasted sandbox key before the demo tomorrow",
+ "rank": 1, "since": "new"}
+```
+
+`key` = `item.meta["key"]` if set, else `norm_key(item.text)`; `section` in start_here | attention | active_task
+| still_open | decided | repos; `group` as printed in Still open, else `notes`; `date` = `item_day`; `text` = the
+rendered line without `ID_TAIL`, the `group: ` prefix and ` (Nd)`; `rank` from 1 within the section; `since` in
+new | returned | "" (6.2). An id printed twice is recorded once, Start here first.
+
+**History** `state/item-history.json`: `{"updated": "<run date>", "last_run": "<job id>", "items": {key:
+record}}`, read-modify-write under `path_lock` plus `FileLock(lock_path_for(path))`, writer only:
+
+```
+{"id": "c0ffee01", "text": "Rotate the pasted sandbox key ...", "first_seen": "2026-10-07",
+ "last_seen": "2026-10-09", "times_shown": 3, "sections": ["start_here", "start_here", "still_open"],
+ "status": "open", "snoozed_until": null, "resolved_at": null}
+```
+
+`sections` logs one entry per run that showed the key, so `sections.count("start_here")` is the Start here budget
+and `len(sections) == times_shown`; `id` and `text` are the last rendered values; `status` in open | done |
+snoozed | dropped.
+
+### 6.1 Aging, applied while building the note
+
+Per run: load history and `state/attention/*.json` (section 7), build the plans, then update history from the
+sidecar.
+
+1. Done: a key with `status == "done"` is excluded from every section and the fallback, for ever.
+2. Snoozed: an attention file with `action == "snooze"` and `until > today` sets `status = "snoozed"` and
+   `snoozed_until`; the key is excluded from Start here, Still open and the fallback. On `today >= until` it is
+   open again, printed with `since: "returned"`. A changed text is a new key, hence a new open item at once: the
+   Linear Triage rule falls out of the key.
+3. Start here budget: `render.pick_start_here` drops every id whose key has `sections.count("start_here") >= 2`
+   before Claude's picks and the fallback apply; the item then follows the Still open rules, `(Nd)` unchanged.
+4. Decisions: a `brain_decision` key is printed once; at first print it is filed `status = "done"`, `resolved_at =
+   run date`, so a rerun cannot repeat it.
+5. Dropped: after the sidecar is applied, every open key with `last_seen` older than 7 days becomes `status =
+   "dropped"`, `resolved_at = today`: gone from the daily note, listed in the weekly review. Collected again, it
+   reopens with its old `first_seen`.
+
+### 6.2 Since yesterday
+
+Front matter, not a new section: the hub already reads scalars from `split_front_matter`, brain-nightly ignores
+unknown keys, and no text is repeated where the filter could be missed. New keys:
+`n_since_new` (keys first seen this run), `n_since_resolved` (done this run, by click or decision),
+`n_since_dropped`, `n_since_returned`. The detail is `since` on sidecar records and `resolved_at == run date` in
+history. The hub's "Changed since yesterday" block gains, after the repo lines, `N new threads`, `N threads
+resolved`, `N dropped`, `N back from snooze`, each followed by its texts from history, at most 5.
+
+## 7. Done and Snooze (hub side)
+
+Routes `POST /today/{item_id}/done` and `POST /today/{item_id}/snooze`, one handler `decide_item` in
+`jarvisd/hub/app.py` calling the new module jarvisd/attention.py (beside `jarvisd/inbox.py`, not under hub/),
+shared with the CLI twin `jarvis attend <id> --done | --until <date>`. The Inbox guards in the Inbox order (Host,
+Origin, content type, size and field caps, CSRF in constant time), then:
+
+- `item_id` matches `^[0-9a-f]{8}$` and is in the latest run's sidecar, else 404; the key comes from that record,
+  never from the form. Without a sidecar (older notes) the hub shows no buttons.
+- `until`: tomorrow | 3d | monday (next Monday, never today) | `YYYY-MM-DD` after today, within 90 days; else 422.
+- One lock, the Inbox `_Locked` pattern on `state/attention/` (`path_lock` plus `FileLock`, 20 s); not acquired is
+  `busy`, 409.
+- One file per key, `state/attention/<name>.json`, `name = "-".join(key.split())[:72] + "-" + sha256_hex(key)[:8]`
+  (helper `attention_name` in `jarvisd/common.py`): `{"key", "id", "action": "done" | "snooze", "until":
+  "YYYY-MM-DD" | null, "decided_at": iso, "note": "<digest job id>"}`, via `atomic_write_text`.
+- A decision in force (a done, or a snooze with `until > today`) is 409 `decided`, nothing changes; an expired
+  snooze is replaced.
+- Audit `attention_decided` (`item_id`, `action`, `until`, `digest_run_id`); a save failure emits
+  `attention_decide_failed` (`error`), 502. No text and no key is audited.
+- Success is 303 to `/?ok=done&id=<id>` or `/?ok=snoozed&id=<id>`; flash "Done." or "Snoozed until <date>.".
+  `data.today()` reads `state/attention/` and hides lines with a decision in force (one line `N decided, applied
+  at the next digest` in Everything else), so the line is gone at once.
+
+Markup, Needs you and Still open alike (`[csrf]` is the hidden token field):
+
+```
+<li data-key="rotate the pasted sandbox key before the demo tomorrow" data-id="c0ffee01">
+ <span class="t">Rotate the pasted sandbox key before the demo tomorrow</span>
+ <span class="act"><form method="post" action="/today/c0ffee01/done">[csrf]<button>Done</button></form>
+ <details class="snooze"><summary>Snooze</summary><form method="post" action="/today/c0ffee01/snooze">[csrf]
+  <button name="until" value="tomorrow|3d|monday">...</button> x3 <input type="date" name="until">
+  <button>Pick</button></form></details></span></li>
+```
+
+CSS: `li[data-key] {display:flex; flex-wrap:wrap; gap:.5rem}`, `.t {flex:1 1 20rem; min-width:0}`,
+`.act {margin-left:auto; white-space:nowrap}`: one line at 1440; at 375 `.t` takes the full width and `.act`
+wraps under it. `.snooze` has no `id`, prefs.js ignores it. Buttons are 2rem tall.
+
+## 8. Seen marks (hub side)
+
+`/static/prefs.js` gains a second block, no network, no cookies. `<section id="today"
+data-digest="digest-2026-10-09">`, the first element in main, carries the digest id (`<main id="main">` is pinned
+byte for byte).
+On load and on `hub:refreshed`: read `data-digest` and every `[data-key]`; load `hub:seen` = `{"digest": D,
+"keys": [...], "prev": [...]}`. If the page's digest id differs from `D`: `prev = keys`, `keys` = the page's keys,
+`digest` = the page's id, save; otherwise store nothing. Then add class `seen` to every line whose key is in
+`prev`. A reload or a 30 s refresh of the same digest stores nothing; a thread carried over from the last digest
+you saw is dimmed (`.seen .t {opacity:.6}`, still readable). No storage, nothing dimmed.
+
+## 9. Weekly review (both sides)
+
+Writer: after a successful note write, on the first run of a new ISO week, when `weekly-<week just ended>.md` is
+absent, `jarvisd/digest.py` renders `render.render_weekly` and calls `deps.vault.write_raw("weekly-YYYY-Www.md",
+text, job_id)`; `jarvis weekly [--week YYYY-Www] [--dry-run]` prints or writes the same way (the marker rule lets
+it rewrite its own file). Sources: history, attention files, `state/runs/*/run.json`, audit `correction` events,
+all filtered when first persisted. Front matter: `type: jarvis-weekly`, `week`, `from`, `to`, `generated`,
+`cost_usd`, `n_runs`, `n_failed`, `n_decided`, `n_dropped`, `n_done`, `n_snoozed`, `n_flagged`. Title
+`# Week 2026-W41`, then six `##` sections in this order, an empty one printing `- None.`, newest first, cap 30:
+
+```
+Runs              ^- (?P<runs>\d+) runs?, (?P<failed>\d+) failed, \$(?P<usd>\d+\.\d{2}) Claude\.$
+Decided this week ^- (?P<date>\d{4}-\d{2}-\d{2}): (?P<text>[^\[]{3,200}) \[(?P<id>[0-9a-f]{8})\]$
+Dropped threads   ^- (?P<text>[^\[]{3,200}) \((?P<first>\d{4}-\d{2}-\d{2}) to (?P<last>\d{4}-\d{2}-\d{2})\) \[(?P<id>[0-9a-f]{8})\]$
+Snoozed and done  ^- (?P<action>Done|Snoozed until \d{4}-\d{2}-\d{2}) (?P<date>\d{4}-\d{2}-\d{2}): (?P<text>[^\[]{3,200}) \[(?P<id>[0-9a-f]{8})\]$
+Flagged wrong     ^- (?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}): (?P<id>[0-9a-f]{8}|w-[0-9a-f]{6}), should (?P<should>escalate|hold|skip|other)(?P<leak>, leak)?\.$
+Cost by day       ^- (?P<date>\d{4}-\d{2}-\d{2}): (?P<runs>\d+) runs?, \$(?P<usd>\d+\.\d{2})\.$
+```
+
+Decided and Dropped come from history (`resolved_at` in the week), Snoozed and done from attention files
+(`decided_at`), Flagged wrong from the audit (ids only), Cost by day from the manifests.
+
+Hub: `HubData.activity()` adds `week` (the newest `weekly-*.md` in the raw folder, parsed by
+`digestparse.parse_weekly`, same take-by-heading, regex-per-line, raw-fallback pattern) and `flagged` (the
+`correction` events of the last 7 days as `{ts, item_id, should, leak}`). Activity renders `<details id="week">`
+"This week" after the strip: the six sections, then `<h3>Flagged wrong</h3>` from `flagged`, shown even without a
+note ("No weekly note yet.").
+
+## 10. Tests for phases 3 and 4
+
+| Must change | Why |
+|---|---|
+| `tests/test_hub.py` Today and Activity tests | data-key, buttons, `#today[data-digest]`, hidden decided lines, "This week" with and without a note |
+| `tests/test_render.py` goldens, front matter keys, weekly tests | `n_since_*` (regenerated once); the weekly grammar, `- None.`, `parse_weekly` on real output |
+| `tests/test_digest_e2e.py` | sidecar (no held id) and history after a run; neither on a dry run or a failed vault write |
+| `tests/test_write_locations.py` | `WRITERS` unchanged (writes go through `jarvisd/fsio.py`); a new test pins the state paths jarvisd/attention.py and `jarvisd/digest.py` may name |
+| `tests/test_hub_face.py` prefs test, `test_static_assets`, `docs/hub.md` | `hub:seen` in prefs.js; "The write actions" gains Done and Snooze |
+| new tests/test_attention.py | mirrors `tests/test_inbox.py`: the guards, 404, 422, 409, lock, audit record, one file, redirect |
+
+Must not change: `test_the_hub_never_writes` (GET only),
+`test_mutating_methods_are_refused`, the CSP test, the import ban and banned method names (`decide_item` and
+`attention_name` are not on it), `NAV`, `check.VIEWS`, the nav pins, the CSS bounds, `<main id="main">` and
+"read-only", `tests/test_repo_hygiene.py`, `tests/test_docs.py`.

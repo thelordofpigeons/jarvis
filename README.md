@@ -87,7 +87,7 @@ Phases follow the build order in the [design](docs/v1-design.md). Legend: **Done
 | 1 | Inference base | Adapter only | `jarvisd/local.py` talks to a local llama-server on loopback and is tested against a fake server. No model was downloaded, `bin/bench.ps1` was never run, so there is no throughput, latency or accuracy number. Details: [local tier](docs/local-tier.md) |
 | 2 | Vertical slice | Done | The morning digest end to end: queue, scheduler, tier gate, router contract, audit, CLI, toast. Run by hand on the author's machine since 2026-10-05, with a real Claude call. The unattended 06:30 run has not been observed (see "What this is not") |
 | 3 | Claude bridge | Done | The `claude -p` subprocess bridge with its budget ledger and breaker (`jarvisd/claude.py`) is used live. The Agent SDK escalation and claude-code-router are not built, by decision |
-| 4 | Work hub | Adapter only | Four views (Today, Inbox, Projects, Activity) and the tracker write-back are built and tested offline; a local triage model, Slack and pushed reminders are not built. The page (`jarvisd/hub/app.py`), `jarvis ask`, `jarvis propose` and the tracker adapters never ran for real: no paid proposals run, no confirm or reject outside tests, ClickUp only met a fake server. GitHub, the ClickUp section and ntfy are adapters tested against fakes. See [hub](docs/hub.md) and [proposals](docs/proposals.md) |
+| 4 | Work hub | Adapter only | Four views (Today, Inbox, Projects, Activity), Done and Snooze and the tracker write-back are built and tested offline; local triage, Slack and pushed reminders are not. `jarvisd/hub/app.py`, `jarvis ask`, `jarvis propose` and the adapters never ran for real: no paid proposals run, no decision outside tests, ClickUp met only a fake server. GitHub, ClickUp, ntfy: fakes only. See [hub](docs/hub.md), [proposals](docs/proposals.md) |
 | 5 | Consolidation | Adapter only | `jarvisd/consolidate.py` proposes memory candidates from session notes. Off by default and never run against the real model. Details: [consolidation](docs/consolidation.md) |
 | 6 | Security widening | Not built | No garak, promptfoo or mcp-scan run exists. Only the phase 0 kill-switch simulation is real |
 | 7 | Retrieval | Not built | Native search of the notes tool is used instead |
@@ -128,12 +128,13 @@ Next steps, in order:
 | `jarvis audit` | `tail`, `verify` the hash chain, or `cost` per day |
 | `jarvis breaker` | `status`, or `reset` with a reason |
 | `jarvis local` | `status` and `check` of the local model tier; downloads nothing |
-| `jarvis hub` | the web page on loopback, read-only except the Inbox; `--check` renders every view |
+| `jarvis hub` | loopback web page; writes only on a click (Inbox, Done, Snooze); `--check` renders every view |
 | `jarvis ask` | answer one question from the latest digest and notes, one capped call |
 | `jarvis consolidate` | propose memory candidates from session notes (off by default) |
 | `jarvis propose` `jarvis proposals` | make task proposals (off by default), list, `confirm` or `reject` them |
 | `jarvis clickup` | `check` the flag set for the optional ClickUp section; `--live` makes one paid call |
 | `jarvis tracker` | `check` which task tracker is ready; sends nothing |
+| `jarvis weekly` | the weekly review note; `--dry-run` prints it |
 | `jarvis self-test` | PASS, FAIL and SKIP checks; exit 1 on any FAIL |
 | `jarvis install-task` | print or run the Task Scheduler registration |
 

@@ -65,6 +65,10 @@ n_decided: 1
 n_repos_active: 2
 n_repos_quiet: 2
 n_system_anomalies: 1
+n_since_new: 1
+n_since_resolved: 1
+n_since_dropped: 1
+n_since_returned: 1
 sources: {brain: ok, task: ok, git: ok, system: ok, clickup: disabled, github: ok}
 audit_seq: 3
 audit_head: abc
@@ -141,8 +145,55 @@ Quiet night.
 """
 
 
+# The item sidecar the writer leaves beside the run manifest (contract section 6): one record per rendered item
+# line, keys normalised, no held id. The hub reads it for the stable keys and the Done and Snooze buttons.
+def _sidecar_record(key: str, item_id: str, section: str, text: str, rank: int, group: str = "notes",
+                    since: str = "") -> dict[str, Any]:
+    return {"key": key, "id": item_id, "section": section, "group": group, "date": "2026-10-06", "text": text,
+            "rank": rank, "since": since}
+
+
+SIDECAR = {"job_id": "digest-2026-10-06", "date": "2026-10-06", "items": [
+    _sidecar_record("rotate the pasted sandbox key before the demo tomorrow", "5c4d04ed", "start_here",
+                    "Rotate the pasted sandbox key before the demo tomorrow", 1, since="new"),
+    _sidecar_record("answer the reviewer on the parser fix blocked since monday", "8d94ef0d", "start_here",
+                    "Answer the reviewer on the parser fix, blocked since Monday", 2),
+    _sidecar_record("alpha repo on main 2 runs in a row", "58d5ed8d", "attention", "alpha-repo on main, 2 runs in a row", 1),
+    _sidecar_record("123synth fix parser synthetic task name", "c0ffee01", "active_task",
+                    "123synth fix(parser): synthetic task name, status IN REVIEW, due 2026-10-05 (OVERDUE).", 1),
+    _sidecar_record("confirm the retry budget with the reviewer", "6b6b6b6b", "still_open",
+                    "Confirm the retry budget with the reviewer", 1, group="parser rework"),
+    _sidecar_record("synthetic thread one waiting on a reviewer with code", "e5f6a7b8", "still_open",
+                    "Synthetic thread **one** waiting on a reviewer with `code`", 2, since="returned"),
+    _sidecar_record("second synthetic thread", "0a1b2c3d", "still_open", "Second synthetic thread", 3),
+    _sidecar_record("keep the strict sum of 100 for the scoring quotas", "9f8e7d6c", "decided",
+                    "Keep the strict sum of 100 for the scoring quotas", 1),
+]}
+
+# The writer's history (contract section 6): the texts the "since yesterday" lines show.
+HISTORY = {"updated": "2026-10-06", "last_run": "digest-2026-10-06", "items": {
+    "rotate the pasted sandbox key before the demo tomorrow": {
+        "id": "5c4d04ed", "text": "Rotate the pasted sandbox key before the demo tomorrow", "first_seen": "2026-10-06",
+        "last_seen": "2026-10-06", "times_shown": 1, "sections": ["start_here"], "status": "open",
+        "snoozed_until": None, "resolved_at": None},
+    "keep the strict sum of 100 for the scoring quotas": {
+        "id": "9f8e7d6c", "text": "Keep the strict sum of 100 for the scoring quotas", "first_seen": "2026-10-06",
+        "last_seen": "2026-10-06", "times_shown": 1, "sections": ["decided"], "status": "done",
+        "snoozed_until": None, "resolved_at": "2026-10-06"},
+    "an old synthetic thread nobody mentioned again": {
+        "id": "d0d0d0d0", "text": "An old synthetic thread nobody mentioned again", "first_seen": "2026-09-20",
+        "last_seen": "2026-09-28", "times_shown": 4, "sections": ["still_open"] * 4, "status": "dropped",
+        "snoozed_until": None, "resolved_at": "2026-10-06"},
+}}
+
+
 def _fwd(path: Path) -> str:
     return path.as_posix()
+
+
+def write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=1), encoding="utf-8", newline="\n")
 
 
 @pytest.fixture
@@ -181,6 +232,8 @@ def seeded(tmp_cfg: Config, clock: FakeClock) -> Config:
     run_dir = tmp_cfg.daemon.state_dir / "runs" / "digest-2026-10-06"
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text(manifest.model_dump_json(indent=2), encoding="utf-8", newline="\n")
+    write_json(run_dir / "items.json", SIDECAR)
+    write_json(tmp_cfg.daemon.state_dir / "item-history.json", HISTORY)
     return tmp_cfg
 
 
@@ -370,10 +423,11 @@ def test_today_blocks_in_the_contract_order_and_ids_out_of_the_text(seeded: Conf
              '<details id="else">', '<details id="full">', '<details id="ids">', '<p class="end">That\'s all.</p>']
     positions = [body.index(x) for x in order]
     assert positions == sorted(positions)
-    assert body.rstrip().endswith('<p class="end">That\'s all.</p>')
-    # Needs you: the headline, then the ranked lines with their id in a data attribute only
+    assert body.rstrip().endswith('<p class="end">That\'s all.</p></section>')
+    # Needs you: the headline, then the ranked lines with their key and id in data attributes only
     assert "One task is overdue and one repo moved overnight." in body
-    assert '<ol class="needs"><li data-id="5c4d04ed">Rotate the pasted sandbox key before the demo tomorrow</li>' in body
+    assert ('<ol class="needs"><li data-key="rotate the pasted sandbox key before the demo tomorrow" data-id="5c4d04ed">'
+            '<span class="t">Rotate the pasted sandbox key before the demo tomorrow</span><span class="act">') in body
     visible = re.sub(r"<[^>]+>", " ", body.split('<details id="full">')[0])
     assert not re.search(r"\[[0-9a-f]{8}\]", visible), "an id tail leaked into the visible text"
     assert "5c4d04ed" not in visible and "6b6b6b6b" not in visible
@@ -391,7 +445,8 @@ def test_today_everything_else_holds_still_open_decided_and_system(seeded: Confi
     body = _main(_client(seeded, clock).get("/").text)
     else_block = body.split('<details id="else">')[1].split('<details id="full">')[0]
     assert "<h4>parser rework</h4>" in else_block and "<h4>notes</h4>" in else_block
-    assert '<li data-id="6b6b6b6b">Confirm the retry budget with the reviewer <span class="age">4 days old</span></li>' in else_block
+    assert ('<li data-key="confirm the retry budget with the reviewer" data-id="6b6b6b6b"><span class="t">Confirm the retry '
+            'budget with the reviewer <span class="age">4 days old</span></span><span class="act">') in else_block
     assert "Keep the strict sum of 100 for the scoring quotas" in else_block
     assert "<b>Task</b>: ExampleNightly last ran 2026-10-06 02:30, refused by the operator or administrator" in else_block
     assert "<code>123synth</code>" in else_block and 'class="pill bad">overdue</span>' in else_block
@@ -443,6 +498,118 @@ def test_today_waiting_for_you_lists_the_oldest_three_with_an_inline_confirm(see
     assert waiting.count('action="/inbox/') == 3 and "Synthetic proposal 0" in waiting and "Synthetic proposal 3" not in waiting
     assert '<input type="hidden" name="next" value="/">' in waiting and 'name="csrf"' in waiting
     assert "/reject" not in waiting and "/edit" not in waiting  # those two stay on the Inbox
+
+
+# --- phase 3: keys, Done and Snooze, seen marks, since yesterday (contract sections 6 to 8) ---------------------------
+
+
+def test_today_lines_carry_their_key_and_the_done_and_snooze_controls(seeded: Config, clock: FakeClock) -> None:
+    body = _main(_client(seeded, clock).get("/").text)
+    assert body.startswith('<section id="today" data-digest="digest-2026-10-06">')  # prefs.js reads the digest id here
+    needs = body.split('<ol class="needs">')[1].split("</ol>")[0]
+    assert needs.count("<li ") == 2 and needs.count('data-key="') == 2 and needs.count('class="t"') == 2
+    first = needs.split("</li>")[0]
+    assert first.startswith('<li data-key="rotate the pasted sandbox key before the demo tomorrow" data-id="5c4d04ed">')
+    # Done is a small form with the token; Snooze is a details holding the three choices and a date picker
+    assert '<form method="post" action="/today/5c4d04ed/done" class="inline">' in first
+    assert 'name="csrf"' in first and "<button type=\"submit\">Done</button>" in first
+    snooze = first.split('<details class="snooze">')[1]
+    assert snooze.startswith("<summary>Snooze</summary>") and 'action="/today/5c4d04ed/snooze"' in snooze
+    for value, label in (("tomorrow", "Tomorrow"), ("3d", "3 days"), ("monday", "Monday")):
+        assert f'<button name="until" value="{value}">{label}</button>' in snooze, value
+    assert '<input type="date" name="until"' in snooze and "<button type=\"submit\">Pick</button>" in snooze
+    assert "id=" not in snooze.split("<form")[0]  # the snooze details has no id, so prefs.js leaves it alone
+    # Still open lines carry the same controls; Attention and Decided lines do not
+    else_block = body.split('<details id="else">')[1].split('<details id="full">')[0]
+    assert else_block.count('action="/today/') == 6  # three Still open lines, two forms each
+    attention = body.split("<h2>Attention</h2>")[1].split("<h2>Needs you</h2>")[0]
+    assert "/today/" not in attention
+    decided = else_block.split("<h3>Decided yesterday</h3>")[1]
+    assert "/today/" not in decided
+    # the raw form-action ids never reach the visible text
+    visible = re.sub(r"<[^>]+>", " ", body.split('<details id="full">')[0])
+    assert "5c4d04ed" not in visible and "/today/" not in visible
+
+
+def test_today_without_a_sidecar_keeps_the_keys_and_drops_the_buttons(seeded: Config, clock: FakeClock) -> None:
+    (seeded.daemon.state_dir / "runs" / "digest-2026-10-06" / "items.json").unlink()
+    body = _main(_client(seeded, clock).get("/").text)
+    assert 'data-digest="digest-2026-10-06"' in body
+    # the key falls back to the normalised text, so seen marks still work on a note written before the sidecar
+    assert '<li data-key="rotate the pasted sandbox key before the demo tomorrow" data-id="5c4d04ed"><span class="t">' in body
+    assert "/today/" not in body and 'class="act"' not in body and 'class="snooze"' not in body
+
+
+def test_today_hides_a_line_with_a_decision_in_force_and_shows_an_expired_snooze(seeded: Config, clock: FakeClock) -> None:
+    from jarvisd import attention
+
+    folder = attention.attention_dir(seeded.daemon.state_dir)
+    key = "rotate the pasted sandbox key before the demo tomorrow"
+    write_json(attention.decision_path(seeded.daemon.state_dir, key),
+               {"key": key, "id": "5c4d04ed", "action": "done", "until": None, "decided_at": "2026-10-06T06:00:00+00:00",
+                "note": "digest-2026-10-06"})
+    key2 = "confirm the retry budget with the reviewer"
+    write_json(attention.decision_path(seeded.daemon.state_dir, key2),
+               {"key": key2, "id": "6b6b6b6b", "action": "snooze", "until": "2026-10-09", "decided_at": "2026-10-05T06:00:00+00:00",
+                "note": "digest-2026-10-05"})
+    key3 = "second synthetic thread"
+    write_json(attention.decision_path(seeded.daemon.state_dir, key3),
+               {"key": key3, "id": "0a1b2c3d", "action": "snooze", "until": "2026-10-06", "decided_at": "2026-10-03T06:00:00+00:00",
+                "note": "digest-2026-10-03"})  # expired today: open again
+    (folder / "garbage.json").write_text("{not json", encoding="utf-8")
+    body = _main(_client(seeded, clock).get("/").text)
+    assert "Rotate the pasted sandbox key" not in body.split('<details id="full">')[0]
+    assert 'data-id="8d94ef0d"' in body  # the other ranked line stays
+    else_block = body.split('<details id="else">')[1].split('<details id="full">')[0]
+    assert "Confirm the retry budget" not in else_block and "<h4>parser rework</h4>" not in else_block
+    assert 'data-id="0a1b2c3d"' in else_block  # the expired snooze is back
+    assert '<p class="lede decided">2 lines decided, applied at the next digest.</p>' in else_block
+    # the Full digest still holds the whole note, decisions included: it is the record, not the triage
+    assert "Rotate the pasted sandbox key" in body.split('<details id="full">')[1]
+
+
+def test_today_changed_since_yesterday_lists_the_thread_lines_from_the_history(seeded: Config, clock: FakeClock) -> None:
+    body = _main(_client(seeded, clock).get("/").text)
+    changed = body.split("<h2>Changed since yesterday</h2>")[1].split('<details id="else">')[0]
+    # after the repo lines and the count lines, the four thread lines with their texts
+    assert changed.index("held 3, was 1") < changed.index("1 new thread")
+    assert '<li class="since-new">1 new thread<ul class="since"><li>Rotate the pasted sandbox key before the demo tomorrow</li></ul></li>' in changed
+    assert '<li class="since-resolved">1 thread resolved<ul class="since"><li>Keep the strict sum of 100 for the scoring quotas</li></ul></li>' in changed
+    assert '<li class="since-dropped">1 thread dropped<ul class="since"><li>An old synthetic thread nobody mentioned again</li></ul></li>' in changed
+    assert ('<li class="since-returned">1 thread back from snooze<ul class="since"><li>Synthetic thread **one** waiting on a '
+            'reviewer with `code`</li></ul></li>') in changed
+    # a note without the keys (yesterday's) adds nothing
+    data = hub_data.HubData(seeded, clock)
+    assert data.since({}, "2026-10-05", []) == []
+    assert data.since({"n_since_new": "x"}, "2026-10-06", []) == []
+    # a key with a decision in force is not listed as new or returned either
+    hidden = data.since({"n_since_new": "1", "n_since_returned": "1"}, "2026-10-06", SIDECAR["items"],
+                        {"rotate the pasted sandbox key before the demo tomorrow", "synthetic thread one waiting on a reviewer with code"})
+    assert [s["texts"] for s in hidden] == [[], []]
+
+
+def test_since_texts_are_capped_and_the_history_may_be_missing(seeded: Config, clock: FakeClock) -> None:
+    history = dict(HISTORY)
+    history["items"] = {f"thread {n}": {"text": f"Synthetic thread {n}", "first_seen": "2026-10-06", "status": "open"} for n in range(8)}
+    write_json(seeded.daemon.state_dir / "item-history.json", history)
+    data = hub_data.HubData(seeded, clock)
+    since = data.since({"n_since_new": "8"}, "2026-10-06", [])
+    assert since[0]["n"] == 8 and len(since[0]["texts"]) == hub_data.SINCE_TEXTS
+    (seeded.daemon.state_dir / "item-history.json").unlink()
+    data = hub_data.HubData(seeded, clock)
+    assert data.since({"n_since_new": "2"}, "2026-10-06", []) == [{"n": 2, "word": "new thread", "kind": "new", "texts": []}]
+    assert _client(seeded, clock).get("/").status_code == 200
+
+
+def test_the_phase_3_reads_create_nothing(seeded: Config, clock: FakeClock, tmp_path: Path) -> None:
+    (seeded.daemon.state_dir / "runs" / "digest-2026-10-06" / "items.json").unlink()
+    (seeded.daemon.state_dir / "item-history.json").unlink()
+    before = _snapshot(tmp_path)
+    client = _client(seeded, clock)
+    for path in ("/", "/?ok=done&id=5c4d04ed", "/?ok=snoozed&id=5c4d04ed", "/activity", "/today/5c4d04ed/done"):
+        assert client.get(path).status_code in (200, 405), path
+    assert _snapshot(tmp_path) == before
+    assert not (seeded.daemon.state_dir / "attention").exists()
 
 
 def test_a_digest_page_by_job_id(seeded: Config, clock: FakeClock) -> None:
@@ -498,6 +665,96 @@ def test_activity_strip_tiles(seeded: Config, clock: FakeClock) -> None:
     assert '<dl class="tiles">' in body and "<dt>Digest runs</dt><dd>1</dd>" in body and "<dt>Next digest</dt>" in body
     for anchor in ("runs", "delivered", "held", "audit", "status"):
         assert f'<details id="{anchor}">' in body, anchor
+
+
+WEEKLY = """---
+type: jarvis-weekly
+generator: jarvisd
+week: 2026-W40
+from: 2026-09-28
+to: 2026-10-04
+generated: 2026-10-05T05:31:00+00:00
+cost_usd: 0.1900
+n_runs: 7
+n_failed: 1
+n_decided: 1
+n_dropped: 1
+n_done: 1
+n_snoozed: 1
+n_flagged: 1
+tags: [jarvis, weekly]
+---
+# Week 2026-W40
+
+## Runs
+- 7 runs, 1 failed, $0.19 Claude.
+
+## Decided this week
+- 2026-10-03: Keep the strict sum of 100 for the scoring quotas [9f8e7d6c]
+
+## Dropped threads
+- An old synthetic thread nobody mentioned again (2026-09-20 to 2026-09-28) [d0d0d0d0]
+
+## Snoozed and done
+- Done 2026-10-02: Rotate the pasted sandbox key before the demo tomorrow [5c4d04ed]
+- Snoozed until 2026-10-09 2026-10-01: Confirm the retry budget with the reviewer [6b6b6b6b]
+- a line the parser does not know
+
+## Flagged wrong
+- 2026-10-01 09:12: w-b33f54, should hold, leak.
+
+## Cost by day
+- 2026-10-04: 1 run, $0.03.
+- 2026-10-03: 2 runs, $0.05.
+"""
+
+
+def test_activity_this_week_without_a_note_shows_the_live_flagged_list(seeded: Config, clock: FakeClock) -> None:
+    body = _client(seeded, clock).get("/activity").text
+    week = body.split('<details id="week">')[1].split("</details>")[0]
+    assert week.startswith("<summary>This week</summary>") and "No weekly note yet." in week
+    assert "<h3>Flagged wrong</h3>" in week and "Nothing flagged wrong in the last 7 days." in week
+    # a correction recorded with `jarvis wrong` shows up by id and reason, never the note
+    AuditLog(daemon.audit_path(seeded), clock=clock, mirror_stdout=False).emit(
+        "correction", item_id="58d5ed8d", should="escalate", leak=False, note_chars=42)
+    AuditLog(daemon.audit_path(seeded), clock=clock, mirror_stdout=False).emit(
+        "correction", item_id="w-b33f54", should="hold", leak=True, note_chars=9)
+    model = hub_data.HubData(seeded, clock).activity()
+    assert [f["item_id"] for f in model["flagged"]] == ["w-b33f54", "58d5ed8d"]  # newest first
+    assert model["flagged"][0] == {"ts": model["flagged"][0]["ts"], "item_id": "w-b33f54", "should": "hold", "leak": True}
+    assert model["tiles"]["flagged"] == 2
+    week = _client(seeded, clock).get("/activity").text.split('<details id="week">')[1].split("</details>")[0]
+    assert "<code>58d5ed8d</code>, should have been escalated" in week
+    assert "<code>w-b33f54</code>, should have been held back <span class=\"pill bad\">leak</span>" in week
+    assert "note_chars" not in week and "42" not in week.split("<h3>Flagged wrong</h3>")[1]
+
+
+def test_activity_this_week_renders_the_weekly_note(seeded: Config, clock: FakeClock) -> None:
+    raw = Path(seeded.paths.vault_write_raw)
+    (raw / "weekly-2026-W39.md").write_text(WEEKLY.replace("2026-W40", "2026-W39"), encoding="utf-8", newline="\n")
+    (raw / "weekly-2026-W40.md").write_text(WEEKLY, encoding="utf-8", newline="\n")
+    (raw / "weekly-notes.md").write_text("# not a weekly note\n", encoding="utf-8", newline="\n")
+    data = hub_data.HubData(seeded, clock)
+    assert [p.name for p in data.weekly_files()] == ["weekly-2026-W39.md", "weekly-2026-W40.md"]
+    week = data.weekly()
+    assert week is not None and week["week"] == "2026-W40" and week["name"] == "weekly-2026-W40"
+    assert week["counts"]["runs"] == 7 and week["sections"]["runs"]["rows"][0]["fields"]["usd"] == "0.19"
+    body = _client(seeded, clock).get("/activity").text
+    block = body.split('<details id="week">')[1].split("</details>")[0]
+    assert "Week 2026-W40 (2026-09-28 to 2026-10-04): 7 runs, 1 failed, 0.1900 USD of Claude calls." in block
+    for heading in ("Runs", "Decided this week", "Dropped threads", "Snoozed and done", "Cost by day"):
+        assert f"<h3>{heading}</h3>" in block, heading
+    assert block.count("<h3>Flagged wrong</h3>") == 1  # the note's section and the live list are one heading
+    assert '<li data-id="9f8e7d6c">2026-10-03: Keep the strict sum of 100 for the scoring quotas</li>' in block
+    assert "An old synthetic thread nobody mentioned again (2026-09-20 to 2026-09-28)" in block
+    assert "Done 2026-10-02: Rotate the pasted sandbox key before the demo tomorrow" in block
+    assert '<ul class="raw"><li>a line the parser does not know</li></ul>' in block  # the tolerant fallback
+    assert "2026-10-04: 1 run, $0.03." in block
+    # without a correction in the audit the note's own Flagged wrong rows are shown, in words
+    assert "From the weekly note" in block and "<code>w-b33f54</code>, should have been held back" in block
+    visible = re.sub(r"<[^>]+>", " ", block)
+    assert not re.search(r"\[[0-9a-f]{8}\]", visible)
+    assert "generator: jarvisd" not in block
 
 
 def test_activity_shows_held_references_and_instructions_never_content(seeded: Config, clock: FakeClock) -> None:
@@ -641,6 +898,7 @@ def test_static_assets(seeded: Config) -> None:
     assert "prefers-color-scheme" in css.text and "@media" in css.text
     assert "fetch(" in js.text and "hub:refreshed" in js.text
     assert "localStorage" in prefs.text and "hub:refreshed" in prefs.text and "fetch(" not in prefs.text
+    assert "hub:seen" in prefs.text and "data-digest" in prefs.text and "XMLHttpRequest" not in prefs.text
     assert client.get("/static/other.js").status_code == 404
 
 
@@ -834,7 +1092,8 @@ def test_activity_tiles_say_tomorrow_and_the_page_has_h2s(seeded: Config, clock:
     body = _client(seeded, clock).get("/activity").text
     assert re.search(r"<dt>Next digest</dt><dd>(Today|Tomorrow) \d\d:\d\d</dd>", body)
     assert "<h2>Last 7 days</h2>" in body and "<h2>Records</h2>" in body
-    assert body.index("<h2>Last 7 days</h2>") < body.index('<dl class="tiles">') < body.index("<h2>Records</h2>") < body.index("<h3>")
+    assert (body.index("<h2>Last 7 days</h2>") < body.index('<dl class="tiles">') < body.index('<details id="week">')
+            < body.index("<h2>Records</h2>") < body.index('<details id="runs">'))
     assert "1 file," in body and "file(s)" not in body
 
 
@@ -860,6 +1119,11 @@ def test_the_stylesheet_has_tokens_tap_targets_and_states() -> None:
         assert state in CSS, state
     phone = CSS.split("@media (max-width: 40rem)")[1]
     assert "min-height: var(--tap)" in phone and "a.tap { display: inline-block; min-width: var(--tap); padding: var(--space-3) 0; }" in phone
+    # the item line controls: 2rem tall on a desktop, a 44px tap target on a phone, one row that wraps
+    assert "li[data-key] { display: flex; flex-wrap: wrap;" in CSS and "li[data-key] .t { flex: 1 1 20rem; min-width: 0; }" in CSS
+    assert "li[data-key] .act { margin-left: auto; white-space: nowrap;" in CSS and ".seen .t { opacity: 0.6; }" in CSS
+    assert ".act button, .act input[type=\"date\"] { min-height: 2rem;" in CSS
+    assert ".act button, .act input[type=\"date\"], details.snooze > summary { min-height: var(--tap); }" in phone
     assert "dl.tiles { grid-template-columns: repeat(5, 1fr); }" in CSS.split("@media (min-width: 64rem)")[1]
     # the spacing scale replaced the stray literals: no spacing property carries a bare rem value, no radius a px
     base = CSS.split("@media (max-width: 87.99rem)")[0].split("@media (prefers-color-scheme: dark)")[1]

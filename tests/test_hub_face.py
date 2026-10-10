@@ -267,6 +267,78 @@ def test_every_view_loads_prefs_js_and_the_strip_sits_in_the_header(face_cfg: Co
     assert prefs.status_code == 200 and "localStorage" in prefs.text and "hub:refreshed" in prefs.text
     assert not re.search(r"https?://", prefs.text)
     assert "stripText" in face.JS and 'getElementById("strip")' in face.JS
+    # the seen marks (contract section 8): a second block, keyed by the digest id, no network
+    assert '"hub:seen"' in prefs.text and 'getElementById("today")' in prefs.text and '"data-digest"' in prefs.text
+    assert "fetch(" not in prefs.text and "XMLHttpRequest" not in prefs.text and "document.cookie" not in prefs.text
+
+
+# A browser-less stand-in for the few DOM calls prefs.js makes, so the seen-marks rule runs under node: a page is
+# a digest id plus its item keys; `classes` records which lines were marked seen; storage is a plain object.
+SEEN_HARNESS = """
+import { readFileSync } from "node:fs";
+const src = readFileSync(%s, "utf8");
+const store = {};
+globalThis.localStorage = {
+  getItem: (k) => (k in store ? store[k] : null),
+  setItem: (k, v) => { store[k] = String(v); },
+};
+globalThis.location = { pathname: "/" };
+let page = null;
+function makeLine(key) {
+  const el = { seen: false, getAttribute: (n) => (n === "data-key" ? key : null) };
+  el.classList = { add: (c) => { if (c === "seen") { el.seen = true; } } };
+  return el;
+}
+const listeners = {};
+globalThis.document = {
+  getElementById: (id) => (id === "today" && page ? page.section : null),
+  querySelectorAll: (sel) => (sel === "details[id]" ? [] : page ? page.lines : []),
+  addEventListener: (name, fn) => { (listeners[name] = listeners[name] || []).push(fn); },
+};
+function show(digest, keys) {
+  page = { lines: keys.map(makeLine) };
+  page.section = { getAttribute: (n) => (n === "data-digest" ? digest : null), querySelectorAll: () => page.lines };
+}
+function refresh() { for (const fn of listeners["hub:refreshed"] || []) { fn(); } }
+function seen() { return page.lines.filter((l) => l.seen).map((l) => l.getAttribute("data-key")); }
+const out = {};
+show("digest-2026-10-06", ["k1", "k2"]);
+(0, eval)(src);
+out.first_visit = seen();
+out.stored_after_first = JSON.parse(store["hub:seen"]);
+show("digest-2026-10-06", ["k1", "k2", "k3"]);  // the 30 s refresh of the same digest
+refresh();
+out.same_digest = seen();
+out.stored_after_refresh = JSON.parse(store["hub:seen"]);
+show("digest-2026-10-07", ["k2", "k4"]);  // the next morning
+refresh();
+out.next_digest = seen();
+out.stored_after_next = JSON.parse(store["hub:seen"]);
+show("digest-2026-10-07", ["k2", "k4"]);  // a reload of that digest
+refresh();
+out.reload = seen();
+out.stored_after_reload = JSON.parse(store["hub:seen"]);
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node is not installed")
+def test_seen_marks_roll_only_when_the_digest_changes(tmp_path: Path) -> None:
+    from jarvisd.hub.assets import PREFS_JS
+
+    script = tmp_path / "prefs.js"
+    script.write_text(PREFS_JS, encoding="utf-8")
+    runner = tmp_path / "seen.mjs"
+    runner.write_text(SEEN_HARNESS % json.dumps(str(script)), encoding="utf-8")
+    done = subprocess.run([NODE, str(runner)], capture_output=True, text=True, timeout=30)
+    assert done.returncode == 0, done.stderr
+    got = json.loads(done.stdout)
+    assert got["first_visit"] == []  # no storage: nothing dimmed
+    assert got["stored_after_first"] == {"digest": "digest-2026-10-06", "keys": ["k1", "k2"], "prev": []}
+    assert got["same_digest"] == [] and got["stored_after_refresh"] == got["stored_after_first"]  # a refresh is not a visit
+    assert got["next_digest"] == ["k2"]  # carried over from the last digest seen
+    assert got["stored_after_next"] == {"digest": "digest-2026-10-07", "keys": ["k2", "k4"], "prev": ["k1", "k2"]}
+    assert got["reload"] == ["k2"] and got["stored_after_reload"] == got["stored_after_next"]
 
 
 def test_the_companion_css_keeps_the_pill_visible_above_phone_width() -> None:

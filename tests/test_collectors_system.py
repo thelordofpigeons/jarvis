@@ -442,3 +442,18 @@ def test_undecodable_bytes_degrade_to_unavailable_and_name_the_log(
     result = make(tmp_cfg, audit, clock).collect(ctx_for(tmp_cfg))
     assert result.ok and result.facts["logs_available"] is False
     assert "Kill switch and watchdog logs: unavailable (watchdog.jsonl is not UTF-8 text)." in lines_of(result)
+
+
+def test_the_resident_daemon_skipping_its_own_trigger_is_healthy(
+        tmp_cfg: Config, audit: AuditLog, clock: FakeClock, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The daemon runs under IgnoreNew: its 06:00 trigger meets the running instance and Windows records
+    # 0x800710E0. For the resident task that is a skip, not a refusal; any other task still reads as refused.
+    import jarvisd.collectors.system as system
+
+    assert "JarvisDaemon" in system.RESIDENT_TASKS
+    monkeypatch.setattr(system, "RESIDENT_TASKS", frozenset({"ExampleWeekly"}))
+    runner = FakeRunner(weekly=(0, json.dumps({"LastRunTime": "2026-10-06T06:00:00+01:00", "LastTaskResult": 2147946720})))
+    result = make(tmp_cfg, audit, clock, runner).collect(ctx_for(tmp_cfg))
+    weekly = result.facts["scheduled_tasks"]["ExampleWeekly"]
+    assert weekly["ok"] is True and weekly["last_result_text"] == system.RESIDENT_SKIP_TEXT
+    assert "ExampleWeekly: last run 2026-10-06 06:00, skipped, the daemon was already running (0x800710E0)." in lines_of(result)

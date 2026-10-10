@@ -110,7 +110,22 @@ mistake. Every item line ends in its id ` [xxxxxxxx]`, which `jarvis wrong <id>`
 follows the id. Two sections vanish when empty: Still open and Decided yesterday. The front
 matter counts what each section shows (`n_start_here`, `n_attention`, `n_still_open`,
 `n_still_open_hidden`, `n_decided`, `n_repos_active`, `n_repos_quiet`, `n_system_anomalies`),
-next to the older `items` dict.
+next to the older `items` dict, and what moved since the last note (`n_since_new`,
+`n_since_resolved`, `n_since_dropped`, `n_since_returned`).
+
+The note remembers what it showed (contract section 6.1). A thread sits in Start here at most two
+mornings, then moves to Still open with its age in days. A decision prints once, the morning after it
+was recorded. An open thread nobody mentioned for more than seven days leaves the daily note and is
+listed in the weekly review; collected again, it comes back. A line marked Done in the hub (or with
+`jarvis attend <id> --done`) never prints again; a snoozed one (`--until tomorrow|3d|monday|YYYY-MM-DD`)
+is back on its date, or at once if its text changed. `jarvis run-digest --dry-run` applies the same
+rules in memory, so the dry note is the note the morning run would write.
+
+The weekly review `raw/jarvis/weekly-YYYY-Www.md` is written by the first digest of a new ISO week
+for the week just ended (when there was something to review: a run, a decision, a dropped thread, a
+click or a correction) and by `jarvis weekly`, optionally `--week 2026-W41` or `--dry-run`. Six
+sections: Runs, Decided this week, Dropped threads, Snoozed and done, Flagged wrong (ids only), Cost
+by day. The hub's Activity view shows the newest one under "This week".
 
 ## Reading the audit
 
@@ -273,6 +288,16 @@ All gitignored: `queue/{pending,running,done,failed,held}` (jobs and held refere
 `state/` (budget, breaker, watermark, heartbeat, `daemon.lock`, `KILL`, `PAUSE`,
 `corrections.jsonl`, `runs/<job_id>/run.json`) and `logs/`. Delete nothing by hand while the
 daemon runs. `jarvis held [<id>]` is the only place a held item's source path is shown.
+
+Item state, since the hub rework (`docs/hub-rework-contract.md` sections 6 and 7):
+`state/runs/<job_id>/items.json` (one record per item line of that note, written after the note),
+`state/item-history.json` (the writer's memory per item key: first and last seen, times shown,
+status open, done, snoozed or dropped; the digest is its only writer) and `state/attention/<name>.json`
+(one Done or Snooze decision per key, written by the hub and `jarvis attend`, applied by the next
+digest). All three hold ids, keys and the text of lines that were already in a note; a sensitive-held
+item has no line, so it is in none of them. Deleting `item-history.json` forgets what was shown (every
+thread is new again and a decision printed once may print again); the attention files keep their
+effect.
 
 ## Incident runbook
 

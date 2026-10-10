@@ -35,12 +35,13 @@ from typing import Any
 from pydantic import ValidationError
 
 from jarvisd import __version__, daemon
+from jarvisd import attention as attention_mod
 from jarvisd import local as local_tier
 from jarvisd.audit import AuditLog
 from jarvisd.cli import _digest_files, _raw_dir, _status_lines
 from jarvisd.common import iso, local_now, parse_iso
 from jarvisd.config import Config
-from jarvisd.hub.digestparse import FAILING_CI_TOKENS, parse_note, repo_rows
+from jarvisd.hub.digestparse import FAILING_CI_TOKENS, parse_note, parse_weekly, repo_rows
 from jarvisd.hub.mdhtml import section, split_front_matter
 from jarvisd.jobstore import JOB_STATES, STATES, _pid_alive
 from jarvisd.models import Job, RunManifest
@@ -48,7 +49,12 @@ from jarvisd.scheduler import DIGEST_KIND, due_at
 from jarvisd.state import StateStore
 
 DIGEST_ID = re.compile(r"^digest-\d{4}-\d{2}-\d{2}(?:-r\d+)?$")
+WEEKLY_FILE = re.compile(r"^weekly-(\d{4})-W(\d{2})\.md$")
 MAX_NOTE_BYTES = 2_000_000
+# "Since yesterday" detail (contract 6.2): the front matter count, the words on the page, and where the texts come from.
+SINCE_LINES = (("n_since_new", "new thread", "new"), ("n_since_resolved", "thread resolved", "resolved"),
+               ("n_since_dropped", "thread dropped", "dropped"), ("n_since_returned", "thread back from snooze", "returned"))
+SINCE_TEXTS = 5
 # Fields that are chain plumbing, not content, so the Audit view leaves them out of the details.
 _AUDIT_PLUMBING = {"ts", "event", "seq", "prev", "h", "run_id", "pid", "ver"}
 _ZERO_BREAKER = {"state": "closed", "reason": "", "opened_at": None, "until": None,
@@ -318,6 +324,45 @@ class HubData:
                 return note
         return None
 
+    def weekly_files(self) -> list[Path]:
+        """The weekly review notes in the raw folder, oldest first (`weekly-YYYY-Www.md`, contract section 9)."""
+        folder = _raw_dir(self.cfg)
+        try:
+            return sorted(p for p in folder.iterdir() if WEEKLY_FILE.match(p.name)) if folder.is_dir() else []
+        except OSError:
+            return []
+
+    def weekly(self) -> dict[str, Any] | None:
+        """The newest weekly note, parsed; None when there is none yet. Cached by the files' signature."""
+        files = self.weekly_files()
+
+        def build(paths: list[Path]) -> dict[str, Any] | None:
+            for path in reversed(paths):
+                note = self.read_digest(path)
+                if note is not None:
+                    parsed = parse_weekly(note["body"], note["meta"])
+                    parsed["name"] = path.stem
+                    return parsed
+            return None
+
+        return self._cached("weekly", files, build)
+
+    def flagged(self, snap: AuditSnapshot, since: datetime) -> list[dict[str, Any]]:
+        """The `correction` audit events since `since`, newest first: {ts, item_id, should, leak}. Ids and flags only,
+        which is all the audit holds (the free-text note stays in the local corrections file)."""
+        out: list[dict[str, Any]] = []
+        for rec in reversed(snap.records):
+            if rec.get("event") != "correction":
+                continue
+            try:
+                if parse_iso(str(rec.get("ts"))) < since:
+                    continue
+            except ValueError:
+                continue
+            out.append({"ts": str(rec.get("ts") or ""), "item_id": str(rec.get("item_id") or ""),
+                        "should": str(rec.get("should") or ""), "leak": bool(rec.get("leak"))})
+        return out
+
     def digest_by_id(self, job_id: str) -> dict[str, Any] | None:
         """One digest note. The id must look like digest-YYYY-MM-DD[-rN], so no path can be spelled."""
         if not DIGEST_ID.match(job_id):
@@ -326,6 +371,74 @@ class HubData:
             if path.stem == job_id:
                 return self.read_digest(path)
         return None
+
+    # --- item state (phase 3): the writer's sidecar and history, the decisions folder; all read, nothing created ---
+
+    def sidecar(self, job_id: str | None) -> list[dict[str, Any]]:
+        """The item records of one run's `items.json`, in page order; [] for a note without one."""
+        if not job_id or not DIGEST_ID.match(job_id):
+            return []
+        path = attention_mod.sidecar_path(self.state_dir, job_id)
+        return self._cached(f"sidecar:{job_id}", [path], lambda paths: attention_mod.sidecar_items(_read_json(paths[0])))
+
+    def decisions(self) -> dict[str, dict[str, Any]]:
+        """Every readable Done or Snooze record under `state/attention/`, by item key."""
+
+        def build(paths: list[Path]) -> dict[str, dict[str, Any]]:
+            out: dict[str, dict[str, Any]] = {}
+            for path in paths:
+                rec = attention_mod.decision_record(_read_json(path))
+                if rec is not None:
+                    out[rec["key"]] = rec
+            return out
+
+        return self._cached("attention", _json_files(attention_mod.attention_dir(self.state_dir)), build)
+
+    def history(self) -> dict[str, dict[str, Any]]:
+        """The writer's `state/item-history.json` items by key, tolerant of a missing or malformed file."""
+        path = self.state_dir / "item-history.json"
+
+        def build(paths: list[Path]) -> dict[str, dict[str, Any]]:
+            raw = _read_json(paths[0])
+            items = raw.get("items") if isinstance(raw, dict) else None
+            if not isinstance(items, dict):
+                return {}
+            return {str(k): v for k, v in items.items() if isinstance(v, dict)}
+
+        return self._cached("item-history", [path], build)
+
+    def since(self, meta: dict[str, Any], note_date: str, sidecar: list[dict[str, Any]],
+              hide: set[str] | frozenset[str] = frozenset()) -> list[dict[str, Any]]:
+        """The four "since yesterday" lines of contract 6.2: the front matter count and up to SINCE_TEXTS texts from the
+        history (`first_seen` or `resolved_at` on the run date) or the sidecar (`since: returned`). A note without the
+        keys (written before phase 3) gives no lines at all. `hide` is the keys with a decision in force: a thread you
+        just marked done is not listed as new or returned, so the line is gone from the whole page at once."""
+        out: list[dict[str, Any]] = []
+        history = self.history()
+        for key, word, kind in SINCE_LINES:
+            try:
+                n = int(str(meta.get(key, "")).strip())
+            except ValueError:
+                continue
+            texts: list[str] = []
+            if kind == "returned":
+                texts = [str(r["text"]) for r in sidecar if r.get("since") == "returned" and r.get("text") and r["key"] not in hide]
+            else:
+                for item_key, rec in history.items():
+                    text = str(rec.get("text") or "")
+                    status = str(rec.get("status") or "")
+                    if not text:
+                        continue
+                    if kind == "new" and str(rec.get("first_seen") or "") == note_date and status in ("open", "snoozed", "") \
+                            and item_key not in hide:
+                        texts.append(text)
+                    elif kind == "resolved" and status == "done" and str(rec.get("resolved_at") or "") == note_date:
+                        texts.append(text)
+                    elif kind == "dropped" and status == "dropped" and str(rec.get("resolved_at") or "") == note_date:
+                        texts.append(text)
+            if n or texts:
+                out.append({"n": n, "word": word, "kind": kind, "texts": texts[:SINCE_TEXTS]})
+        return out
 
     def repos(self) -> dict[str, Any]:
         """The Repos section of the latest digest: parsed rows, plus every other line as text."""
@@ -784,8 +897,19 @@ class HubData:
         latest = history[-1] if history else None
         previous = next((h for h in reversed(history[:-1]) if latest and h["date"] < latest["date"]), None)
         waiting = sorted((p for p in self.proposals() if p["status"] == "proposed"), key=lambda p: (p["created_at"], p["id"]))
+        # Phase 3: the sidecar gives every line its stable key (and makes it decidable); a decision in force hides
+        # the line at once, before the next digest applies it for real.
+        sidecar = self.sidecar(note["job_id"]) if note else []
+        keys = {r["id"]: r["key"] for r in sidecar}
+        today = self.now().date()
+        decisions = self.decisions()
+        in_force = {key: rec for key, rec in decisions.items() if attention_mod.in_force(rec, today)}
+        by_id = {rec["id"]: rec for rec in decisions.values()}
+        since = self.since(note["meta"], str(parsed["date"] or ""), sidecar, set(in_force)) if (note and parsed) else []
         return {"note": note, "parsed": parsed, "delta": self.delta(latest, previous),
-                "waiting": waiting[:WAITING_SHOWN], "waiting_count": len(waiting)}
+                "waiting": waiting[:WAITING_SHOWN], "waiting_count": len(waiting),
+                "digest_id": note["job_id"] if note else "", "keys": keys, "decided": in_force,
+                "decisions_by_id": by_id, "since": since}
 
     def activity(self) -> dict[str, Any]:
         """The Activity view: the 7-day strip, then runs, the ledger, held, the audit and the status lines."""
@@ -824,7 +948,7 @@ class HubData:
         return {"tiles": tiles, "runs": runs, "ledger": self.ledger(), "held": self.held(), "audit": snap,
                 "audit_rows": self.audit_rows(limit), "audit_limit": limit, "budget": status["budget"],
                 "cost_today": self.cost_on(now.date()), "status": status, "status_lines": self.status_lines(status),
-                "now": now}
+                "now": now, "week": self.weekly(), "flagged": self.flagged(snap, since)}
 
 
 def _last_cli_version_from(records: list[dict[str, Any]], now: datetime) -> str | None:

@@ -2,9 +2,9 @@
 
 What this is: a small web page served from your own machine that shows what the JARVIS
 daemon has already recorded, and, in the Inbox, lets you confirm, edit or reject the task
-proposals of [proposals](proposals.md). Every view except the Inbox is a viewer: it reads the
-daemon's files and never writes one, never takes a lock, never calls Claude and never starts a job.
-The Inbox is the one exception, and only on a click: see "The write actions".
+proposals of [proposals](proposals.md). Every GET is a viewer: it reads the daemon's files and
+never writes one, never takes a lock, never calls Claude and never starts a job. Two kinds of click
+are the exceptions: the Inbox decisions, and Done or Snooze on a Today line. See "The write actions".
 
 ```
 jarvis hub                 # serve on http://127.0.0.1:8765/ until Ctrl+C
@@ -15,17 +15,20 @@ jarvis hub --check         # render every view once against the real state, then
 ## Status, stated plainly
 
 - **Built and tested:** the four views (Today, Inbox, Projects, Activity) and the face, the Inbox with its three
-  POST routes, the loopback, Host and Origin guards, the CSRF token, the read-only data layer, the digest
-  parser (`jarvisd/hub/digestparse.py`) and `jarvis hub --check`. The suites are `tests/test_hub.py`,
-  `tests/test_hub_digestparse.py`, `tests/test_hub_projects.py`, `tests/test_hub_reminders.py`,
-  `tests/test_hub_face.py` and `tests/test_inbox.py`. They drive the real application through
-  FastAPI's `TestClient` over a throwaway tree that the daemon's own writers filled, and
-  `tests/test_hub.py` compares the whole tree byte for byte before and after every read-only view.
-  The Inbox tests use a fake tracker, or the markdown adapter on a throwaway vault.
+  POST routes, Done and Snooze on Today with their two POST routes (`jarvisd/attention.py`), the seen marks and
+  the "This week" disclosure, the loopback, Host and Origin guards, the CSRF token, the read-only data layer,
+  the digest and weekly parsers (`jarvisd/hub/digestparse.py`) and `jarvis hub --check`. The suites are
+  `tests/test_hub.py`, `tests/test_hub_digestparse.py`, `tests/test_hub_projects.py`,
+  `tests/test_hub_reminders.py`, `tests/test_hub_face.py`, `tests/test_inbox.py` and
+  `tests/test_attention.py`. They drive the real application through FastAPI's `TestClient` over a throwaway
+  tree that the daemon's own writers filled, and `tests/test_hub.py` compares the whole tree byte for byte
+  before and after every read-only view. The Inbox tests use a fake tracker, or the markdown adapter on a
+  throwaway vault.
 - **Never done for real:** a confirm or a reject outside the tests, a confirm against the live
-  ClickUp service, and a confirm of a proposal made by the real model (no paid proposals run has
-  been made). Everything the Inbox does has met only a fake tracker, the markdown adapter on a
-  throwaway vault and a local stand-in for ClickUp.
+  ClickUp service, a confirm of a proposal made by the real model (no paid proposals run has
+  been made), and a Done or Snooze on a real digest line. Everything the Inbox does has met only a fake
+  tracker, the markdown adapter on a throwaway vault and a local stand-in for ClickUp; Done and Snooze
+  have met the test tree only.
 - **Not built:** pushed reminders (ntfy), ClickUp due dates on the Inbox pills, local triage of events, Slack data, a SQLite index,
   authentication, TLS. The page has no login because it listens on loopback only.
 - **Tested against fakes only:** the ClickUp adapter has never talked to the real ClickUp service,
@@ -45,10 +48,10 @@ record-keeping views open on a summary and keep their tables behind disclosures.
 
 | View | What it shows | Where the data comes from |
 |---|---|---|
-| Today | Attention (what is broken, or "Nothing broken."), Needs you (the headline and at most five ranked lines), Waiting for you (the Inbox count and the three oldest proposals with an inline Confirm), Changed since yesterday (the repo delta against the previous note, decisions recorded, held count), then three disclosures: Everything else (active task, still open threads by group, decided yesterday, system), Full digest (the metadata card and the whole note) and Item ids (the `jarvis wrong <id>` command per ranked line) | the two newest digest notes in the vault's `raw/jarvis` folder, parsed by `jarvisd/hub/digestparse.py`; `state/proposals/` |
+| Today | Attention (what is broken, or "Nothing broken."), Needs you (the headline and at most five ranked lines, each with a Done button and a Snooze disclosure), Waiting for you (the Inbox count and the three oldest proposals with an inline Confirm), Changed since yesterday (the repo delta against the previous note, decisions recorded, held count, then the new, resolved, dropped and returned threads with their texts), then three disclosures: Everything else (active task, still open threads by group with the same two controls, decided yesterday, system; a line "N lines decided, applied at the next digest" when a decision hides something), Full digest (the metadata card and the whole note) and Item ids (the `jarvis wrong <id>` command per ranked line). A line carried over from the last digest you saw is dimmed (seen marks, below) | the two newest digest notes in the vault's `raw/jarvis` folder, parsed by `jarvisd/hub/digestparse.py`; the run's item sidecar `state/runs/<job>/items.json` and `state/item-history.json` (written by the digest); `state/attention/`; `state/proposals/` |
 | Inbox | The proposals waiting for a decision as slim cards: title, why, pills (project, due, outcome unknown), the three buttons; the identifiers and the evidence behind "Evidence and ids". Newest first; `?sort=due` orders by due date, undated last. Evidence ids the run's note does not carry collapse to one line | `state/proposals/`, the digest note of the proposal's run, `queue/held/` |
 | Projects | Active repositories first (commits in the latest note, open pull requests, failing CI, any risk, or uncommitted work unless the repo is listed in `[hub].always_dirty`): branch, what moved since yesterday, the counts, GitHub, risk pills (red for CI failing and an overdue task, amber for uncommitted work and a stale repo) and the active task, open proposals (a zero is an empty cell). Then "Quiet: N repos" with a disclosure naming them with their idle days, and the Repos table as collected behind "Repos as collected". A card list under 40rem; each Active row is anchored `#repo-<name>` so an Attention row on Today can point at it | the digest notes (up to 60), `state/proposals/`, the config |
-| Activity | A strip of ten tiles for the last 7 days (digest runs, failed, Claude USD, proposals made, confirmed, rejected, kept back, flagged wrong, chain verified, next digest), the chain card and today's budget, then disclosures: Digest runs, Delivered, Kept back, Audit records and Daemon status | `state/runs/<job>/run.json`, `queue/*/`, `logs/jarvisd-audit*.jsonl`, `state/budget.json`, `state/proposals/`, `queue/held/`, `state/` |
+| Activity | A strip of ten tiles for the last 7 days (digest runs, failed, Claude USD, proposals made, confirmed, rejected, kept back, flagged wrong, chain verified, next digest), the chain card and today's budget, a "This week" disclosure (the newest weekly review note, section by section, then "Flagged wrong": the `correction` audit events of the last 7 days as id and reason, shown even before the first weekly note), then disclosures: Digest runs, Delivered, Kept back, Audit records and Daemon status | `state/runs/<job>/run.json`, `queue/*/`, `logs/jarvisd-audit*.jsonl`, `state/budget.json`, `state/proposals/`, `queue/held/`, `state/`, the newest `weekly-YYYY-Www.md` in `raw/jarvis` |
 | Face (`/face`, not in the nav) | The lantern avatar, with a state taken from `/api/status`; see "The face" | `/api/status`, the avatar folder |
 
 `/api/status` returns the Daemon status data as JSON, plus `last_digest.at` (the finish stamp the strip
@@ -120,7 +123,22 @@ Collapsing uses native `<details>`. Which ones you opened is remembered per page
 `localStorage` by `/static/prefs.js` (loaded on every page, with or without the refresh script) and
 restored after `/static/hub.js` swaps `<main>`, which announces `hub:refreshed` on the document when it
 does. Nothing of that reaches the server. The refresh is a plain `fetch` of the same URL every
-`[hub].refresh_s` seconds, paused while the tab is hidden; the Inbox never refreshes itself.
+`[hub].refresh_s` seconds, paused while the tab is hidden; the Inbox never refreshes itself. The Snooze
+disclosure on an item line has no id, so its open state is not remembered.
+
+### Item keys and seen marks
+
+Every Needs you and Still open line carries the item's stable key (`data-key`) and its id (`data-id`). The key is
+the one the digest writer put in the run's sidecar `state/runs/<job>/items.json` (the normalised text, contract
+section 6); for a note written before the sidecar existed the hub normalises the text itself, so the marks below
+still work, but the Done and Snooze buttons need the sidecar and are not drawn without it.
+
+The second block of `/static/prefs.js` keeps one record in `localStorage`, `hub:seen`: the id of the last digest
+you looked at and its keys. When Today shows a different digest id (the `data-digest` attribute of the
+`<section id="today">`), the previous keys become `prev` and the new ones are stored; a reload or the 30 second
+refresh of the same digest stores nothing, so it does not count as a visit. A line whose key is in `prev` gets the
+class `seen` and its text is dimmed to 60 percent, still readable: it was already on the last digest you saw.
+No storage, nothing dimmed. Nothing of this reaches the server, and the server keeps no record of what you saw.
 
 Held items are references. The page shows the id, the kind and the reason code, and drops
 the source path before the data reaches any view (`jarvisd/hub/data.py`), because resolving
@@ -183,8 +201,11 @@ before the page says the chain is broken.
 - A request whose `Host` header is not `localhost`, `127.0.0.1`, `[::1]` or listed in
   `[hub].allowed_hosts` gets 403. That stops a web page on another origin from reading the
   hub through DNS rebinding. A POST also needs an `Origin` that is absent or equals that Host (below).
-- Everything is GET except three Inbox routes (`POST /inbox/<id>/confirm`, `/edit` and `/reject`),
-  and any other method gets 405. Those routes follow the rules in "The write actions" below.
+- Everything is GET except five routes: three on the Inbox (`POST /inbox/<id>/confirm`, `/edit` and `/reject`)
+  and two on Today (`POST /today/<id>/done` and `/snooze`); any other method gets 405. All five follow the
+  rules in "The write actions" below. There are two write paths, not one: the Inbox decisions in
+  `jarvisd/inbox.py` (a proposal file, and a tracker call), and the Today decisions in `jarvisd/attention.py`
+  (one file under `state/attention/`, nothing else, no outward call).
 - `Content-Security-Policy` allows same-origin CSS and JS only. No inline script or style, no
   CDN, no web font, and the generated API docs (which load from a CDN) are switched off.
 - Every value is HTML-escaped, including text read from the vault. The markdown renderer
@@ -196,7 +217,9 @@ before the page says the chain is broken.
   `jarvisd/inbox.py` imports `jarvisd/daemon.py` (which imports the Claude client and subprocess) and
   `jarvisd/tracker.py` (which imports `urllib`), so the hub process loads them, and a confirm can reach
   the network through the ClickUp adapter. What holds is that no hub code path calls the Claude client,
-  and that the only writes go through `jarvisd/inbox.py`.
+  and that the only writes go through `jarvisd/inbox.py` and `jarvisd/attention.py`, both through the
+  durable IO of `jarvisd/fsio.py` (`tests/test_write_locations.py` lists the modules that may open a file
+  for writing; neither of these is on it).
 - No login. The page can only show what is already on this machine, to someone who can already
   reach this machine's loopback port. The Inbox forms carry a per-process token (below), which is a
   defence against other web pages, not a password.
@@ -254,7 +277,8 @@ so the click and the terminal cannot drift apart.
 - **Every write is audited**: `proposal_confirmed`, `proposal_confirm_failed`,
   `proposal_confirm_override`, `proposal_rejected` and `proposal_reject_failed`, with ids, the adapter
   name and the link, never a title, an edit or the text of a reason. The digest run a proposal came
-  from is recorded as `digest_run_id`. The adapters add their own records, see below.
+  from is recorded as `digest_run_id`. The adapters add their own records, see below. The Today decisions
+  add `attention_decided` and `attention_decide_failed` ("Done and Snooze on Today").
 - **Evidence stays references.** The Inbox shows an evidence id's digest line only if the item was
   cleared. A held id shows the id alone, never a summary, and the adapters refuse any evidence that
   is not an id, so free text cannot ride into a tracker request.
@@ -270,6 +294,36 @@ jarvis proposals reject <id> --reason "why"
 
 The terminal door is a second path to the same tracker call, so "only a click in the Inbox creates a
 task" really means "only a human decision, from the Inbox or from this command".
+
+### Done and Snooze on Today
+
+The second write path, and a much smaller one. Every Needs you and Still open line has a Done button and a Snooze
+disclosure (Tomorrow, 3 days, Monday, or a date), both `POST` routes (`/today/<id>/done`, `/today/<id>/snooze`)
+handled by `decide_item` in `jarvisd/hub/app.py`, which calls `jarvisd/attention.py`. The terminal twin is
+`jarvis attend <id> --done` or `jarvis attend <id> --until tomorrow|3d|monday|YYYY-MM-DD` (`cmd_attend` in the
+same module; the CLI wiring is the writer side's).
+
+- **The same guards, in the same order** as the Inbox: Host allowlist, Origin, content type, body size, field
+  count, the CSRF token in constant time. Then:
+- **The id must be in the latest run's sidecar** (`state/runs/<job>/items.json`), else 404. The item's key is read
+  from that record; nothing in the form is trusted beyond the `until` choice. Older notes have no sidecar, so their
+  lines carry no buttons and a post is refused.
+- **`until`** is `tomorrow`, `3d`, `monday` (the next Monday, never today) or `YYYY-MM-DD` after today and within
+  90 days, else 422 and nothing changes.
+- **One file per key**, `state/attention/<words>-<8 hex of the key's hash>.json`, holding `key`, `id`, `action`
+  (`done` or `snooze`), `until` (a date or null), `decided_at` and `note` (the digest run id), written with
+  `atomic_write_text`. That folder is the only thing this path writes. One lock, in-process and cross-process
+  (`state/attention/decide.lock`, 20 s); not acquired is 409 "busy".
+- **A decision in force is 409** (a done, or a snooze whose date has not passed) and changes nothing; an expired
+  snooze is replaced. Two clicks at once end in one file and one audit record.
+- **Audited**: `attention_decided` with `item_id`, `action`, `until` and `digest_run_id`; a save failure is 502
+  and `attention_decide_failed` with a short error code. Never the key and never the text.
+- **Success is 303** to Today with a banner ("Done." or "Snoozed until <date>."), and the line is gone at once:
+  `data.today()` reads `state/attention/` and hides every line whose key has a decision in force, with one line
+  "N lines decided, applied at the next digest" under Everything else. The Full digest keeps the whole note.
+- **What the writer does with it**: the digest reads the folder before rendering (contract section 6.1): a done
+  key is excluded for ever, a snoozed key until its date, after which the line returns marked "back from snooze"
+  in Changed since yesterday. A thread whose text changes has a new key and comes back at once.
 
 ## Where a confirmed proposal goes
 

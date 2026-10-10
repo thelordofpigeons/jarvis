@@ -9,7 +9,10 @@ tracked here and nowhere else:
 - the circuit breaker around the Claude call;
 - the watermark: the end of the last successfully written digest window;
 - liveness: heartbeat, the clean-shutdown marker, the KILL and PAUSE files, and the
-  single-instance lock.
+  single-instance lock;
+- the item history (`item-history.json`, written by the digest only) and the attention
+  decisions under `attention/` (written by the hub and the CLI, read here), the writer side
+  of docs/hub-rework-contract.md sections 6 and 7.
 
 Read-modify-write on a file takes an in-process lock plus a cross-process FileLock on a
 sidecar, because the CLI can run while the daemon is up. State that goes wrong fails
@@ -436,6 +439,146 @@ class Watermark:
             return True
 
 
+# --- item history and attention decisions (docs/hub-rework-contract.md sections 6 and 7) ---
+
+ITEM_HISTORY_FILE = "item-history.json"
+ATTENTION_DIR = "attention"
+# An open key not shown for more than this many days is dropped from the daily note and listed in the
+# weekly review (contract 6.1 rule 5). The same number as common.STALE_AFTER_DAYS, restated here so this
+# module keeps its single import of common.
+DROP_AFTER_DAYS = 7
+_ATTENTION_ACTIONS = frozenset({"done", "snooze"})
+
+
+def _empty_history() -> dict[str, Any]:
+    return {"updated": None, "last_run": None, "items": {}}
+
+
+def _fresh_record(today: str) -> dict[str, Any]:
+    return {"id": "", "text": "", "first_seen": today, "last_seen": today, "times_shown": 0, "sections": [],
+            "status": "open", "snoozed_until": None, "resolved_at": None}
+
+
+def update_history(history: dict[str, Any], records: list[dict[str, Any]], decisions: list[dict[str, Any]],
+                   today: date, job_id: str) -> dict[str, int]:
+    """Apply one run's sidecar records and the attention decisions to the history, in place.
+
+    Pure: no I/O. Rules (contract 6.1): every record bumps `times_shown`, appends its section and refreshes
+    `last_seen`, `id` and `text`; a key printed under Decided is filed done at once; a dropped or snoozed
+    key that is printed again reopens with its old `first_seen`; a done decision files the key done; a
+    snooze decision sets `snoozed` while `until` is ahead and reopens the key once it is not; finally every
+    open key whose `last_seen` is older than DROP_AFTER_DAYS becomes dropped. Returns the counts of what
+    changed: new, resolved, dropped, returned.
+    """
+    items = history.setdefault("items", {})
+    if not isinstance(items, dict):
+        items = history["items"] = {}
+    day = today.isoformat()
+    counts = {"new": 0, "resolved": 0, "dropped": 0, "returned": 0}
+    seen: set[str] = set()
+    for rec in records:
+        key = str(rec.get("key") or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        entry = items.get(key)
+        if not isinstance(entry, dict):
+            entry = items[key] = _fresh_record(day)
+            counts["new"] += 1
+        entry["id"] = str(rec.get("id") or entry.get("id") or "")
+        entry["text"] = str(rec.get("text") or entry.get("text") or "")
+        entry["last_seen"] = day
+        entry["times_shown"] = int(entry.get("times_shown") or 0) + 1
+        sections = entry.setdefault("sections", [])
+        if not isinstance(sections, list):
+            sections = entry["sections"] = []
+        sections.append(str(rec.get("section") or ""))
+        if rec.get("section") == "decided":
+            if entry.get("status") != "done":
+                counts["resolved"] += 1
+            entry.update(status="done", resolved_at=day)
+        elif entry.get("status") in ("dropped", "snoozed"):
+            if entry.get("status") == "snoozed":
+                counts["returned"] += 1
+            entry.update(status="open", resolved_at=None, snoozed_until=None)
+    for d in decisions:
+        key = str(d.get("key") or "") if isinstance(d, dict) else ""
+        action = d.get("action") if isinstance(d, dict) else None
+        if not key or action not in _ATTENTION_ACTIONS:
+            continue
+        entry = items.get(key)
+        if not isinstance(entry, dict):
+            entry = items[key] = _fresh_record(day)
+            entry["id"], entry["text"] = str(d.get("id") or ""), key
+        if action == "done":
+            if entry.get("status") != "done":
+                counts["resolved"] += 1
+                entry.update(status="done", resolved_at=day)
+        elif entry.get("status") != "done":
+            until = str(d.get("until") or "")
+            if until > day:
+                entry.update(status="snoozed", snoozed_until=until, resolved_at=None)
+            elif entry.get("status") == "snoozed":
+                entry.update(status="open", snoozed_until=None)
+    cutoff = (today - timedelta(days=DROP_AFTER_DAYS)).isoformat()
+    for entry in items.values():
+        if not isinstance(entry, dict):
+            continue
+        if entry.get("status") == "snoozed" and str(entry.get("snoozed_until") or "") <= day:
+            entry.update(status="open", snoozed_until=None)
+        if entry.get("status") == "open" and str(entry.get("last_seen") or "") < cutoff:
+            entry.update(status="dropped", resolved_at=day)
+            counts["dropped"] += 1
+    history["updated"] = day
+    history["last_run"] = job_id
+    return counts
+
+
+class ItemHistory:
+    """`state/item-history.json` and the `state/attention/` decisions: the writer's memory of item keys.
+
+    The digest writer is the only writer of the history (read-modify-write under `_locked`); the hub and the
+    CLI write the attention files and read both. Everything stored here came from View-filtered sidecar
+    records, so a sensitive-held item has no key, text or id in either place.
+    """
+
+    def __init__(self, store: "StateStore") -> None:
+        self.path = store.dir / ITEM_HISTORY_FILE
+        self.attention_dir = store.dir / ATTENTION_DIR
+
+    def load(self) -> dict[str, Any]:
+        """The history, or an empty one when the file is missing or unreadable (a corrupt file is replaced
+        on the next apply; nothing here is a safety decision)."""
+        data, status = _read_json(self.path)
+        if status != "ok" or data is None or not isinstance(data.get("items"), dict):
+            return _empty_history()
+        return data
+
+    def decisions(self) -> list[dict[str, Any]]:
+        """Every readable `state/attention/*.json` with a key and a known action, by file name."""
+        if not self.attention_dir.is_dir():
+            return []
+        out: list[dict[str, Any]] = []
+        try:
+            paths = sorted(p for p in self.attention_dir.iterdir() if p.suffix == ".json" and p.is_file())
+        except OSError:
+            return []
+        for path in paths:
+            data, status = _read_json(path)
+            if status == "ok" and data is not None and data.get("key") and data.get("action") in _ATTENTION_ACTIONS:
+                out.append(data)
+        return out
+
+    def apply(self, records: list[dict[str, Any]], decisions: list[dict[str, Any]], today: date,
+              job_id: str) -> dict[str, int]:
+        """Read, update with `update_history`, write back, under the in-process and cross-process locks."""
+        with _locked(self.path):
+            history = self.load()
+            counts = update_history(history, records, decisions, today, job_id)
+            _write_json(self.path, history)
+        return counts
+
+
 # --- the store -------------------------------------------------------------------------
 
 
@@ -462,6 +605,7 @@ class StateStore:
         self.budget = Budget(self)
         self.breaker = Breaker(self)
         self.watermark = Watermark(self)
+        self.items = ItemHistory(self)
 
     @classmethod
     def from_config(cls, cfg: "Config", *, clock: Clock | None = None, tz: tzinfo | None = None) -> "StateStore":

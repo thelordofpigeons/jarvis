@@ -353,6 +353,18 @@ orderly stop and the next start), `PAUSE` (`until`, `reason`), `KILL` (presence 
 and refuse to restart), `corrections.jsonl`, `runs/<job_id>/run.json` (the manifest for the
 phase 4 hub: stage statuses, counts, cost, paths, hashes; no item text).
 
+Item state (`docs/hub-rework-contract.md` sections 6 and 7), written after the note is in the
+vault and only then: `runs/<job_id>/items.json`, one record per rendered item line (`key`, `id`,
+`section`, `group`, `date`, `text`, `rank`, `since`), read back from the rendered sections so a
+sensitive-held id, which has no line, has no record; `item-history.json`, the writer's memory per
+key (`first_seen`, `last_seen`, `times_shown`, `sections`, `status` open, done, snoozed or dropped,
+`snoozed_until`, `resolved_at`), read-modify-write under the state lock by the digest alone;
+`attention/<name>.json`, one Done or Snooze decision per key (`key`, `id`, `action`, `until`,
+`decided_at`, `note`), written by the hub's two POST routes and `jarvis attend`, read by the
+digest before it renders. A done key never prints again, a snoozed key waits for its date, a key
+shown twice in Start here moves to Still open, and an open key idle for more than seven days is
+dropped from the daily note and listed in the weekly review.
+
 ---
 
 ## 6. Gate semantics with the stub
@@ -719,6 +731,20 @@ The heading `## Open threads` is never used in this file so `brain-nightly.py` c
 confuse it with a session note (the open threads section is `## Still open`), and the brain
 collector excludes `raw/jarvis/`. An empty window renders "Nothing changed overnight: no
 commits, no new sessions" explicitly. All Claude-originated strings pass `strip_dashes`.
+
+The front matter also carries four "since yesterday" counters (`n_since_new`, `n_since_resolved`,
+`n_since_dropped`, `n_since_returned`, contract section 6.2); the detail is the `since` field of
+the sidecar records and `resolved_at` in the history, never a repeated line of text.
+
+One more file goes through the same writer and the same gate: the weekly review
+`raw/jarvis/weekly-YYYY-Www.md` (`jarvisd/weekly.py`, `render.render_weekly`, contract section 9),
+written on the first run of a new ISO week when the file for the week just ended is absent and the
+week has something to review, or by `jarvis weekly [--week YYYY-Www] [--dry-run]`. Front matter
+`type: jarvis-weekly` with the week, its bounds, the cost and seven counts; title `# Week YYYY-Www`;
+six sections in a fixed order, Runs, Decided this week, Dropped threads, Snoozed and done, Flagged
+wrong, Cost by day, one regex per line, `- None.` when empty, newest first, cap 30. Its sources are
+the history, the attention files, the run manifests and the audit's `correction` events, all of
+them filtered when they were first persisted; a flagged item appears as its id only.
 
 ---
 

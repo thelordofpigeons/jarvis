@@ -96,6 +96,8 @@ Folders, all relative to the repository root unless they start with `~`:
 | `jarvisd/propose.py` | task proposals from the latest complete digest run, one gated payload and one capped call, written to `state/proposals/`; creates nothing in a tracker |
 | `jarvisd/tracker.py` | tracker adapters behind one Protocol: markdown (default, through the vault writer) and ClickUp (REST, token from the environment); a human click in the Inbox is the only caller |
 | `jarvisd/inbox.py` | the Inbox decisions, shared by the hub forms and `jarvis proposals confirm` and `reject`: one lock, tracker first and file second, one atomic write, audited |
+| `jarvisd/weekly.py` | the weekly review note (`raw/jarvis/weekly-YYYY-Www.md`) from the item history, the attention decisions, the run manifests and the audit's corrections; written by the first digest of a new week and by `jarvis weekly`, through the vault writer |
+| `jarvisd/attention.py` | Done and Snooze on a digest item, shared by the hub's Today buttons and `jarvis attend`: the id checked against the run's item sidecar, one lock, one atomic write under `state/attention/`, audited by id only; the digest reads the folder to age the item |
 | `jarvisd/notify.py` | notifier protocol: Windows toast, ntfy push (`docs/notify-ntfy.md`), a null notifier |
 | `jarvisd/vault.py` | the only code that writes into the notes vault, three allowed places, enforced by an AST test |
 | `jarvisd/scheduler.py` | idempotent `reconcile` and the APScheduler host |

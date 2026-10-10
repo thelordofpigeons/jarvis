@@ -214,6 +214,10 @@ def build_parser() -> argparse.ArgumentParser:
     tracker_sub = p.add_subparsers(dest="tracker_command", required=True, metavar="action")
     tracker_sub.add_parser("check", help="adapter, token present yes/no, list map size, markdown path writable")
 
+    p = sub.add_parser("weekly", help="write the weekly review for the ISO week just ended, through the vault writer")
+    p.add_argument("--week", default=None, metavar="YYYY-Www", help="another week (default: the one just ended)")
+    p.add_argument("--dry-run", action="store_true", help="print the note, write nothing")
+
     p = sub.add_parser("self-test", help="PASS/FAIL checks, exit 1 on any FAIL")
     p.add_argument("--live", action="store_true", help="add the paid smoke (not in this build)")
 
@@ -895,6 +899,12 @@ def cmd_propose(ctx: Ctx, args: argparse.Namespace) -> int:
     return propose.cmd_propose(ctx, args)
 
 
+def cmd_weekly(ctx: Ctx, args: argparse.Namespace) -> int:
+    from jarvisd import weekly  # the same renderer and vault path the digest uses on the first run of a week
+
+    return weekly.cmd_weekly(ctx, args)
+
+
 def cmd_proposals(ctx: Ctx, args: argparse.Namespace) -> int:
     from jarvisd import inbox, propose
 
@@ -969,7 +979,7 @@ HANDLERS: dict[str, Callable[[Ctx, argparse.Namespace], int]] = {
     "held": cmd_held, "wrong": cmd_wrong, "pause": cmd_pause, "resume": cmd_resume, "audit": cmd_audit,
     "breaker": cmd_breaker, "local": cmd_local, "ask": cmd_ask, "clickup": cmd_clickup, "tracker": cmd_tracker, "hub": cmd_hub, "self-test": cmd_self_test,
     "install-task": cmd_install_task, "consolidate": cmd_consolidate, "propose": cmd_propose,
-    "proposals": cmd_proposals,
+    "proposals": cmd_proposals, "weekly": cmd_weekly,
 }
 
 

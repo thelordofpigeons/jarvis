@@ -67,6 +67,73 @@ def _parse(text: str) -> dict:
 # --- grammar 2, the fixture note ------------------------------------------------------------------------------
 
 
+# --- the weekly review note (contract section 9) ---------------------------------------------------------------------
+
+
+def test_parse_weekly_reads_the_six_sections_and_keeps_unknown_lines() -> None:
+    from test_hub import WEEKLY
+
+    meta, body = split_front_matter(WEEKLY)
+    week = dp.parse_weekly(body, meta)
+    assert week["type"] == "jarvis-weekly" and week["week"] == "2026-W40" and week["from"] == "2026-09-28"
+    assert week["counts"] == {"runs": 7, "failed": 1, "decided": 1, "dropped": 1, "done": 1, "snoozed": 1, "flagged": 1}
+    assert week["missing"] == []
+    s = week["sections"]
+    assert s["runs"]["rows"][0]["fields"] == {"runs": "7", "failed": "1", "usd": "0.19"}
+    assert s["runs"]["rows"][0]["text"] == "7 runs, 1 failed, $0.19 Claude."
+    assert s["decided"]["rows"][0]["id"] == "9f8e7d6c" and s["decided"]["rows"][0]["fields"]["date"] == "2026-10-03"
+    assert s["decided"]["rows"][0]["text"] == "2026-10-03: Keep the strict sum of 100 for the scoring quotas"
+    assert s["dropped"]["rows"][0]["fields"]["first"] == "2026-09-20" and s["dropped"]["rows"][0]["id"] == "d0d0d0d0"
+    assert [r["fields"]["action"] for r in s["snoozed"]["rows"]] == ["Done", "Snoozed until 2026-10-09"]
+    assert s["snoozed"]["other"] == ["a line the parser does not know"]
+    assert s["flagged"]["rows"][0]["fields"]["should"] == "hold" and s["flagged"]["rows"][0]["leak"] is True
+    assert s["flagged"]["rows"][0]["text"] == "2026-10-01 09:12: w-b33f54"
+    assert [r["fields"]["usd"] for r in s["cost"]["rows"]] == ["0.03", "0.05"]
+    assert all(not sec["none"] for sec in s.values())
+
+
+def test_parse_weekly_treats_none_lines_and_missing_headings_as_empty() -> None:
+    body = "# Week 2026-W41\n\n## Runs\n- None.\n\n## Decided this week\n- None.\n\n## Cost by day\n- 2026-10-06: 1 run, $0.02.\n"
+    week = dp.parse_weekly(body, {"week": "2026-W41", "n_runs": "0"})
+    assert week["sections"]["runs"]["none"] is True and week["sections"]["runs"]["rows"] == []
+    assert sorted(week["missing"]) == ["dropped", "flagged", "snoozed"]
+    assert week["sections"]["dropped"] == {"rows": [], "other": [], "none": False, "present": False}
+    assert week["counts"]["runs"] == 0 and week["counts"]["failed"] is None
+    assert week["sections"]["cost"]["rows"][0]["fields"]["runs"] == "1"
+
+
+def test_parse_weekly_headings_are_the_writers() -> None:
+    theirs = render.WEEKLY_HEADINGS
+    if isinstance(theirs, dict):
+        assert dp.WEEKLY_HEADINGS == {k: theirs[k] for k in dp.WEEKLY_SECTIONS}
+    else:
+        assert tuple(dp.WEEKLY_HEADINGS[k] for k in dp.WEEKLY_SECTIONS) == tuple(theirs)
+    assert list(dp.WEEKLY_HEADINGS) == list(dp.WEEKLY_SECTIONS)
+
+
+def test_parse_weekly_on_the_real_render_weekly_output() -> None:
+    from datetime import date, datetime, timezone
+
+    ctx = render.WeeklyContext(
+        week="2026-W40", start=date(2026, 9, 28), end=date(2026, 10, 4), generated_at=datetime(2026, 10, 5, 5, 31, tzinfo=timezone.utc),
+        runs=[{"date": "2026-10-03", "status": "complete", "cost_usd": 0.03}, {"date": "2026-10-04", "status": "failed", "cost_usd": 0.0}],
+        decided=[{"date": "2026-10-03", "text": "Keep the strict sum of 100 for the scoring quotas", "id": "9f8e7d6c"}],
+        dropped=[{"text": "An old synthetic thread nobody mentioned again", "first": "2026-09-20", "last": "2026-09-28", "id": "d0d0d0d0"}],
+        attended=[{"action": "done", "until": None, "date": "2026-10-02", "text": "Rotate the pasted sandbox key", "id": "5c4d04ed"},
+                  {"action": "snooze", "until": "2026-10-09", "date": "2026-10-01", "text": "Confirm the retry budget", "id": "6b6b6b6b"}],
+        flagged=[{"ts": "2026-10-01 09:12", "id": "w-b33f54", "should": "hold", "leak": True}])
+    meta, body = split_front_matter(render.render_weekly(ctx))
+    week = dp.parse_weekly(body, meta)
+    assert week["missing"] == [] and week["type"] == "jarvis-weekly" and week["week"] == "2026-W40"
+    for key, sec in week["sections"].items():
+        assert sec["other"] == [], (key, sec["other"])  # every line of the real note matches the contract's regex
+        assert sec["rows"] or sec["none"], key
+    assert week["sections"]["runs"]["rows"][0]["fields"] == {"runs": "2", "failed": "1", "usd": "0.03"}
+    assert week["sections"]["snoozed"]["rows"][0]["fields"]["action"] == "Done"
+    assert week["sections"]["flagged"]["rows"][0]["leak"] is True
+    assert week["counts"]["done"] == 1 and week["counts"]["snoozed"] == 1
+
+
 def test_grammar_2_fixture_parses_every_block_with_nothing_left_over() -> None:
     p = _parse(DIGEST)
     assert p["grammar"] == 2 and p["missing"] == []

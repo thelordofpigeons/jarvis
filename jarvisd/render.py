@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from jarvisd import __version__
@@ -67,6 +67,15 @@ DEFAULT_SECTIONS: tuple[str, ...] = (
     "flag_mistake",
 )
 FOOTER_SECTIONS = ("source_status", "flag_mistake")
+# The sections whose item lines go to the per-run sidecar (contract section 6), in page order.
+SIDECAR_SECTIONS = ("start_here", "attention", "active_task", "still_open", "decided", "repos")
+STILL_OPEN_LINE = re.compile(
+    r"^- (?P<group>[^:\[\]]{1,60}): (?P<text>[^\[]+?)(?: \((?P<age>\d+)d\))? \[(?P<id>[0-9a-f]{8})\]$")
+START_HERE_BUDGET = 2  # runs a key may spend in Start here before it falls back to Still open
+# The weekly review (contract section 9).
+WEEKLY_HEADINGS: dict[str, str] = {"runs": "Runs", "decided": "Decided this week", "dropped": "Dropped threads",
+                                   "snoozed": "Snoozed and done", "flagged": "Flagged wrong", "cost": "Cost by day"}
+MAX_WEEKLY = 30
 SOURCE_ORDER = ("brain", "task", "git", "github", "system")
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 MAX_ATTENTION = 5
@@ -122,12 +131,31 @@ class RenderError(Exception):
     """A section tried to emit something the layout forbids. A programming error, not data."""
 
 
+@dataclass(frozen=True)
+class Aging:
+    """What the item history and the attention files say about keys (contract section 6.1).
+
+    Built by `aging_from` in the digest pipeline from `state/item-history.json` and
+    `state/attention/*.json`; the renderer only reads it. Every set holds normalised keys.
+    """
+
+    known: frozenset[str] = frozenset()  # every key the history has seen
+    done: frozenset[str] = frozenset()  # excluded from every section, for ever
+    snoozed: frozenset[str] = frozenset()  # excluded from Start here, Still open and the fallback
+    spent: frozenset[str] = frozenset()  # shown in Start here START_HERE_BUDGET times already
+    returned: frozenset[str] = frozenset()  # a snooze ended: printed with `since: returned`
+    resolved: frozenset[str] = frozenset()  # done by a click since the last run, not yet filed
+    dropping: frozenset[str] = frozenset()  # open keys idle over STALE_AFTER_DAYS, dropped unless collected again
+
+
 @dataclass
 class DigestContext:
     """Everything the renderer needs, supplied by the digest pipeline.
 
     `held` merges collector-withheld references and gate-held items (hold_kind says which
     kind). Gate-held items stay in `results`; the renderer hides the sensitive ones.
+    `aging` is what history says about keys; the default knows nothing, so a context without
+    history renders exactly as before.
     """
 
     job_id: str
@@ -150,6 +178,7 @@ class DigestContext:
     audit_head: str = GENESIS
     section_order: tuple[str, ...] | None = None
     generator_version: str = __version__
+    aging: Aging = field(default_factory=Aging)
 
 
 # --- string hygiene --------------------------------------------------------------------
@@ -214,11 +243,25 @@ def item_day(item: Item) -> str:
     return str(item.ts or "")[:10]
 
 
+def item_key(item: Item) -> str:
+    """The stable key of an item line: `meta["key"]` (the brain collector sets it), else the normalised text.
+
+    A repo, task or GitHub item has no key of its own and its text changes with every commit subject, so
+    those take their title (the repo or task name): a key that changed every morning could never be snoozed
+    or marked seen. An item with no words at all falls back to its id.
+    """
+    key = str(item.meta.get("key") or "")
+    if not key:
+        key = norm_key(item.text) if item.kind.startswith("brain_") else norm_key(item.title)
+    return key or norm_key(item.text) or norm_key(item.title) or item.id
+
+
 class View:
     """Facts derived from a context once per section call (the context may be mutated between renders)."""
 
     def __init__(self, ctx: DigestContext) -> None:
         self.ctx = ctx
+        self.aging = ctx.aging
         self.items: list[Item] = [it for r in ctx.results.values() for it in r.items if not is_deterministic(it)]
         self.item_ids = {it.id for it in self.items}
         self.sensitive_ids = {w.id for w in ctx.held if w.hold_kind == "sensitive"}
@@ -228,13 +271,22 @@ class View:
         self.cleared_ids = self.item_ids - self.sensitive_ids - self.policy_ids - self.over_cap
 
     def visible(self, source: str, kind: str | None = None) -> list[Item]:
+        """The items a section may print: not sensitive-held, not deterministic, and not filed done
+        (contract 6.1 rule 1: a done key is excluded from every section, for ever)."""
         res = self.ctx.results.get(source)
         if res is None:
             return []
         return [
             it for it in res.items
             if it.id not in self.sensitive_ids and not is_deterministic(it) and (kind is None or it.kind == kind)
+            and item_key(it) not in self.aging.done
         ]
+
+    def shelved(self, item: Item, *, start_here: bool = False) -> bool:
+        """True when aging keeps the item out of Start here, Still open and the fallback: snoozed, or (for
+        Start here only) its budget there is spent."""
+        key = item_key(item)
+        return key in self.aging.snoozed or (start_here and key in self.aging.spent)
 
     def facts(self, source: str) -> dict[str, Any]:
         res = self.ctx.results.get(source)
@@ -292,16 +344,20 @@ def _fallback_attention(v: View) -> list[tuple[str, str]]:
     scored: list[tuple[int, str, str, str]] = []
     for it in v.visible("task", "active_task"):
         state = it.meta.get("due_state")
+        if v.shelved(it, start_here=True):
+            continue
         if state == "overdue":
             scored.append((4, item_day(it), it.id, f"Finish {item_text(it.title, 100)}, overdue since {clean(it.meta.get('due_date', ''))}"))
         elif state == "today":
             scored.append((4, item_day(it), it.id, f"Finish {item_text(it.title, 100)}, it is due today"))
     for it in _threads(v):
-        key = str(it.meta.get("key") or norm_key(it.text))
+        key = item_key(it)
         # The same screen Still open applies: a resolved, cosmetic or reference line is never a Start here pick.
-        if _DEADLINE_RE.search(key) and not _excluded(it, set()):
+        if _DEADLINE_RE.search(key) and not _excluded(v, it, set()) and not v.shelved(it, start_here=True):
             scored.append((3, item_day(it), it.id, f"Act on this thread, it names a deadline or a blocker: {item_text(it.text, 100)}"))
     for it in v.visible("github", "github_repo"):
+        if v.shelved(it, start_here=True):
+            continue
         branch = item_text(it.meta.get("ci_branch") or "the default branch", 80)
         if str(it.meta.get("ci", "")) in CI_FAILING:
             scored.append((3, item_day(it), it.id, f"Fix {_name(it.title)}: CI is failing on {branch}, merges are blocked"))
@@ -310,22 +366,35 @@ def _fallback_attention(v: View) -> list[tuple[str, str]]:
             scored.append((2, item_day(it), it.id, f"Review {plural(n, 'PR')} in {_name(it.title)}, they wait on you"))
     for it in v.visible("git", "git_repo"):
         n = _int(it.meta.get("commits"))
-        if n:
+        if n and not v.shelved(it, start_here=True):
             scored.append((1, item_day(it), it.id, f"Check {_name(it.title)}: {plural(n, 'commit')} since the window start, not yet digested"))
     scored.sort(key=lambda s: (-s[0], _desc(s[1]), s[2]))
     return [(item_id, sentence(why, 159)) for _, _, item_id, why in scored[:MAX_ATTENTION]]
 
 
-def start_here_picks(ctx: DigestContext, v: View) -> list[tuple[str, str]]:
-    """(id, why) for the numbered Start here lines: Claude's ranked picks, or the fallback."""
+def pick_start_here(ctx: DigestContext, v: View) -> list[tuple[str, str]]:
+    """(id, why) for the numbered Start here lines: Claude's ranked picks, or the fallback.
+
+    Aging applies before either (contract 6.1 rule 3): an id whose key is done, snoozed or has spent its
+    Start here budget (`sections.count("start_here") >= START_HERE_BUDGET` in history) is dropped from
+    Claude's picks and never scored by the fallback; the item then follows the Still open rules.
+    """
+    by_id = {it.id: it for it in v.items}
     picks: list[tuple[str, str]] = []
     if ctx.summary is not None:
         for a in ctx.summary.attention:
             why = sentence(a.why, 159)
-            if a.id in v.cleared_ids and len(why) >= 10 and imperative(why):
-                picks.append((a.id, why))
+            it = by_id.get(a.id)
+            if it is None or a.id not in v.cleared_ids or len(why) < 10 or not imperative(why):
+                continue
+            if item_key(it) in v.aging.done or v.shelved(it, start_here=True):
+                continue
+            picks.append((a.id, why))
         picks = picks[:MAX_ATTENTION]
     return picks or _fallback_attention(v)
+
+
+start_here_picks = pick_start_here  # the phase 1 name, kept for callers
 
 
 def imperative(text: str) -> bool:
@@ -375,12 +444,13 @@ def _group_of(item: Item) -> str:
     return clip(text, 60) if text else "notes"
 
 
-def _excluded(item: Item, start_ids: set[str]) -> bool:
-    if item.id in start_ids:
+def _excluded(v: View, item: Item, start_ids: set[str]) -> bool:
+    """The Still open screen: printed elsewhere, stale, resolved, cosmetic, noise, or snoozed (6.1 rule 2)."""
+    if item.id in start_ids or v.shelved(item):
         return True
     if _int(item.meta.get("age_days")) > STALE_AFTER_DAYS or item.meta.get("stale"):
         return True
-    key = str(item.meta.get("key") or norm_key(item.text))
+    key = item_key(item)
     return bool(RESOLVED.search(key) or COSMETIC.search(key) or noise_line(item.text))
 
 
@@ -391,13 +461,13 @@ def _active_task_ids(v: View) -> set[str]:
 
 def still_open_lines(ctx: DigestContext, v: View) -> tuple[list[str], int]:
     """Still open: grouped, de-duplicated and capped open threads, plus how many were hidden."""
-    start_ids = {i for i, _ in start_here_picks(ctx, v)}
+    start_ids = {i for i, _ in pick_start_here(ctx, v)}
     task_ids = _active_task_ids(v)
     seen: set[str] = set()
     kept: list[Item] = []
     for it in _threads(v):
-        key = str(it.meta.get("key") or norm_key(it.text))
-        if _excluded(it, start_ids) or key in seen or any(t in it.text for t in task_ids):
+        key = item_key(it)
+        if _excluded(v, it, start_ids) or key in seen or any(t in it.text for t in task_ids):
             continue
         seen.add(key)
         kept.append(it)
@@ -666,7 +736,7 @@ class StartHere(Section):
         changed = bool(ctx.held) or any(it.kind in ("git_repo", "brain_session") for it in v.items)
         if not changed:
             lines.append("Nothing changed overnight: no commits, no new sessions.")
-        lines.extend(f"{n}. {why}{tail(i)}" for n, (i, why) in enumerate(start_here_picks(ctx, v), start=1))
+        lines.extend(f"{n}. {why}{tail(i)}" for n, (i, why) in enumerate(pick_start_here(ctx, v), start=1))
         return lines
 
 
@@ -887,7 +957,7 @@ def section_counts(ctx: DigestContext) -> dict[str, int]:
         "n_collected": c["collected"],
         "n_cleared": c["cleared"],
         "n_held": c["held_sensitive"] + c["held_policy"],
-        "n_start_here": len(start_here_picks(ctx, v)),
+        "n_start_here": len(pick_start_here(ctx, v)),
         "n_attention": len(attention_lines(ctx, v)),
         "n_still_open": len(still),
         "n_still_open_hidden": hidden,
@@ -895,7 +965,217 @@ def section_counts(ctx: DigestContext) -> dict[str, int]:
         "n_repos_active": repos_active,
         "n_repos_quiet": repos_quiet,
         "n_system_anomalies": system_lines(ctx, v)[1],
+        **since_counts(ctx, sidecar_items(ctx)),
     }
+
+
+# --- item sidecar, aging and the "since yesterday" counts (contract section 6) ----------
+
+_LINE_LEAD = re.compile(r"^(?:- |[1-5]\. )")
+
+
+def sidecar_items(ctx: DigestContext) -> list[dict[str, Any]]:
+    """One record per rendered item line, in page order, from the same section bodies the note prints.
+
+    The records are read back from the rendered lines, so whatever the View filter hid from the page is
+    absent here too: a sensitive-held id never has a line, hence never a record. An id printed twice is
+    recorded once, Start here first. `text` is the line without its lead, the `group: ` prefix, the
+    ` (Nd)` age and the id tail.
+    """
+    v = View(ctx)
+    by_id = {it.id: it for it in v.items if it.id not in v.sensitive_ids}
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for name in SIDECAR_SECTIONS:
+        section = SECTIONS.get(name)
+        if section is None:
+            continue
+        rank = 0
+        for line in section.body(ctx):
+            m = ID_TAIL.search(line)
+            if m is None:
+                continue
+            item_id = m.group("id")
+            it = by_id.get(item_id)
+            if it is None or item_id in seen:
+                continue
+            seen.add(item_id)
+            rank += 1
+            group, text = "notes", _LINE_LEAD.sub("", line[: m.start()])
+            if name == "still_open":
+                om = STILL_OPEN_LINE.match(line)
+                if om is not None:
+                    group, text = om.group("group"), om.group("text")
+            key = item_key(it)
+            since = "new" if key not in v.aging.known else ("returned" if key in v.aging.returned else "")
+            out.append({"key": key, "id": item_id, "section": name, "group": group, "date": item_day(it),
+                        "text": text, "rank": rank, "since": since})
+    return out
+
+
+def since_counts(ctx: DigestContext, records: list[dict[str, Any]]) -> dict[str, int]:
+    """The four `n_since_*` front matter keys (contract 6.2), from the sidecar plan and the aging sets."""
+    a = ctx.aging
+    keys = {str(r["key"]) for r in records}
+    decided = {str(r["key"]) for r in records if r["section"] == "decided"}
+    return {
+        "n_since_new": sum(1 for k in keys if k not in a.known),
+        "n_since_resolved": len(a.resolved | decided),
+        "n_since_dropped": len(a.dropping - keys),
+        "n_since_returned": len(keys & a.returned),
+    }
+
+
+def aging_from(history: dict[str, Any], decisions: list[dict[str, Any]], today: date) -> Aging:
+    """Turn the item history and the attention decisions into the sets the renderer applies.
+
+    History records: `{key: {status, sections, last_seen, snoozed_until, ...}}` under `items`. Decisions
+    are the `state/attention/*.json` files: `{key, action: done | snooze, until}`. A done wins over a
+    snooze; a snooze with `until` in the past has ended, so the key returns; an open key not seen for
+    more than STALE_AFTER_DAYS is dropped by the writer unless this run collects it again.
+    """
+    items = history.get("items") if isinstance(history.get("items"), dict) else {}
+    today_text = today.isoformat()
+    cutoff = (today - timedelta(days=STALE_AFTER_DAYS)).isoformat()
+    done = {k for k, r in items.items() if isinstance(r, dict) and r.get("status") == "done"}
+    snoozed: set[str] = set()
+    returned: set[str] = set()
+    resolved: set[str] = set()
+    for key, rec in items.items():
+        if isinstance(rec, dict) and rec.get("status") == "snoozed":
+            (snoozed if str(rec.get("snoozed_until") or "") > today_text else returned).add(key)
+    for d in decisions:
+        key = str(d.get("key") or "") if isinstance(d, dict) else ""
+        if not key:
+            continue
+        if d.get("action") == "done":
+            if key not in done:
+                resolved.add(key)
+            done.add(key)
+        elif d.get("action") == "snooze":
+            # The attention file is the authority over a stale `snoozed_until` in the history.
+            if str(d.get("until") or "") > today_text:
+                snoozed.add(key)
+                returned.discard(key)
+            else:
+                snoozed.discard(key)
+                if isinstance(items.get(key), dict) and items[key].get("status") == "snoozed":
+                    returned.add(key)
+    snoozed -= done
+    returned -= done
+    spent = {k for k, r in items.items()
+             if isinstance(r, dict) and list(r.get("sections") or []).count("start_here") >= START_HERE_BUDGET}
+    dropping = {k for k, r in items.items()
+                if isinstance(r, dict) and r.get("status") == "open" and str(r.get("last_seen") or "") < cutoff}
+    return Aging(known=frozenset(items), done=frozenset(done), snoozed=frozenset(snoozed), spent=frozenset(spent),
+                 returned=frozenset(returned), resolved=frozenset(resolved), dropping=frozenset(dropping))
+
+
+# --- the weekly review (contract section 9) ----------------------------------------------
+
+
+@dataclass
+class WeeklyContext:
+    """What one ISO week produced, gathered by `jarvisd/weekly.py` from the filtered stores only.
+
+    `runs`: `{date, status, cost_usd}` per run manifest; `decided`: `{date, text, id}`; `dropped`:
+    `{text, first, last, id}`; `attended`: `{action: done | snooze, until, date, text, id}`; `flagged`:
+    `{ts: "YYYY-MM-DD HH:MM", id, should, leak}`. Texts come from the item history, which the digest
+    wrote from View-filtered items; a held item has no text anywhere here.
+    """
+
+    week: str
+    start: date
+    end: date
+    generated_at: datetime
+    runs: list[dict[str, Any]] = field(default_factory=list)
+    decided: list[dict[str, Any]] = field(default_factory=list)
+    dropped: list[dict[str, Any]] = field(default_factory=list)
+    attended: list[dict[str, Any]] = field(default_factory=list)
+    flagged: list[dict[str, Any]] = field(default_factory=list)
+    generator_version: str = __version__
+
+
+def weekly_filename(week: str) -> str:
+    """weekly-YYYY-Www.md, the raw/jarvis name of a weekly review."""
+    return f"weekly-{week}.md"
+
+
+def _week_text(value: object) -> str:
+    text = item_text(value, 200)
+    return text if len(text) >= 3 else "(no text kept)"
+
+
+def _day(value: object) -> str:
+    text = clean(value)[:10]
+    return text if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text) else "0000-00-00"
+
+
+def _weekly_sections(ctx: WeeklyContext) -> dict[str, list[str]]:
+    failed = sum(1 for r in ctx.runs if str(r.get("status")) in ("failed", "error"))
+    cost = sum(float(r.get("cost_usd") or 0.0) for r in ctx.runs)
+    runs = [f"- {plural(len(ctx.runs), 'run')}, {failed} failed, ${cost:.2f} Claude."]
+    decided = [f"- {_day(d.get('date'))}: {_week_text(d.get('text'))}{tail(d.get('id', ''))}"
+               for d in sorted(ctx.decided, key=lambda d: (_desc(_day(d.get("date"))), str(d.get("id"))))]
+    dropped = [f"- {_week_text(d.get('text'))} ({_day(d.get('first'))} to {_day(d.get('last'))}){tail(d.get('id', ''))}"
+               for d in sorted(ctx.dropped, key=lambda d: (_desc(_day(d.get("last"))), str(d.get("id"))))]
+    attended = []
+    for d in sorted(ctx.attended, key=lambda d: (_desc(_day(d.get("date"))), str(d.get("id")))):
+        action = "Done" if d.get("action") == "done" else f"Snoozed until {_day(d.get('until'))}"
+        attended.append(f"- {action} {_day(d.get('date'))}: {_week_text(d.get('text'))}{tail(d.get('id', ''))}")
+    flagged = []
+    for f in sorted(ctx.flagged, key=lambda f: (_desc(str(f.get("ts"))), str(f.get("id")))):
+        should = str(f.get("should") or "other")
+        should = should if should in ("escalate", "hold", "skip", "other") else "other"
+        flagged.append(f"- {clean(f.get('ts'))}: {clean(f.get('id'))}, should {should}{', leak' if f.get('leak') else ''}.")
+    by_day: dict[str, list[float]] = {}
+    for r in ctx.runs:
+        by_day.setdefault(_day(r.get("date")), []).append(float(r.get("cost_usd") or 0.0))
+    cost_by_day = [f"- {day}: {plural(len(costs), 'run')}, ${sum(costs):.2f}."
+                   for day, costs in sorted(by_day.items(), key=lambda kv: _desc(kv[0]))]
+    out = {"runs": runs, "decided": decided, "dropped": dropped, "snoozed": attended, "flagged": flagged, "cost": cost_by_day}
+    return {name: (lines[:MAX_WEEKLY] or ["- None."]) for name, lines in out.items()}
+
+
+def weekly_counts(ctx: WeeklyContext) -> dict[str, int]:
+    return {
+        "n_runs": len(ctx.runs),
+        "n_failed": sum(1 for r in ctx.runs if str(r.get("status")) in ("failed", "error")),
+        "n_decided": len(ctx.decided),
+        "n_dropped": len(ctx.dropped),
+        "n_done": sum(1 for d in ctx.attended if d.get("action") == "done"),
+        "n_snoozed": sum(1 for d in ctx.attended if d.get("action") != "done"),
+        "n_flagged": len(ctx.flagged),
+    }
+
+
+def render_weekly(ctx: WeeklyContext) -> str:
+    """The weekly review note: front matter, `# Week YYYY-Www`, six sections in the contract order."""
+    if ctx.generated_at.tzinfo is None or ctx.generated_at.utcoffset() is None:
+        raise ValueError("WeeklyContext.generated_at must be timezone-aware")
+    if not re.fullmatch(r"\d{4}-W\d{2}", ctx.week):
+        raise ValueError("week must look like 2026-W41")
+    cost = sum(float(r.get("cost_usd") or 0.0) for r in ctx.runs)
+    pairs = [
+        ("type", "jarvis-weekly"),
+        ("generator", "jarvisd"),
+        ("generator_version", clean(ctx.generator_version)),
+        ("week", ctx.week),
+        ("from", ctx.start.isoformat()),
+        ("to", ctx.end.isoformat()),
+        ("generated", ctx.generated_at.isoformat(timespec="seconds")),
+        ("cost_usd", f"{cost:.4f}"),
+        *((k, str(n)) for k, n in weekly_counts(ctx).items()),
+        ("tags", "[jarvis, weekly]"),
+    ]
+    sections = _weekly_sections(ctx)
+    blocks = ["\n".join(["---", *(f"{k}: {v}" for k, v in pairs), "---", f"# Week {ctx.week}"])]
+    for name, heading in WEEKLY_HEADINGS.items():
+        blocks.append("\n".join([f"## {heading}", *sections[name]]))
+    text = "\n\n".join(blocks) + "\n"
+    if re.search(r"(?im)^##\s+open threads\b", text):
+        raise RenderError("rendered text contains the reserved heading")
+    return text
 
 
 def _front_matter(ctx: DigestContext) -> list[str]:

@@ -5,6 +5,72 @@ machine. The format follows Keep a Changelog; versions are not published to PyPI
 
 ## Unreleased
 
+### Digest writer: item state and the weekly review (`docs/hub-rework-contract.md` sections 6 and 9)
+
+Phases 3 and 4 of the rework, writer side. Verified with the tests and `jarvis run-digest --dry-run`
+(nothing written; the dry note is rendered in memory with the same rules). No real digest was run.
+
+- Item sidecar: after the note is in the vault, `jarvisd/digest.py` writes `state/runs/<job>/items.json`,
+  one record per rendered item line (`key`, `id`, `section`, `group`, `date`, `text`, `rank`, `since`),
+  read back from the rendered sections by `render.sidecar_items`: a sensitive-held id has no line,
+  so it has no record. Nothing is written on a dry run or after a refused vault write.
+- Item history: `state/item-history.json` (`state.ItemHistory`, `update_history`), the writer's memory
+  per key: first and last seen, times shown, one section entry per run, status open, done, snoozed
+  or dropped. Read-modify-write under the state lock; the digest is its only writer.
+- Aging, applied while the note is built (`render.Aging`, `render.aging_from`): a done key is out of
+  every section for ever; a snoozed key is out of Start here, Still open and the fallback until its
+  date, then back with `since: returned` (a changed text is a new key, back at once); a key shown
+  twice in Start here (`render.pick_start_here`, budget 2) moves to Still open with its age; a
+  decision is filed done at first print, so a rerun cannot repeat it; an open key idle for more than
+  seven days is dropped and listed in the weekly review, and reopens with its old `first_seen` when
+  collected again. The attention decisions under `state/attention/` are read before rendering.
+- Front matter gains `n_since_new`, `n_since_resolved`, `n_since_dropped`, `n_since_returned`; the
+  goldens were regenerated once, deliberately, for those four lines.
+- Weekly review: `raw/jarvis/weekly-YYYY-Www.md` (`jarvisd/weekly.py`, `render.render_weekly`), written
+  by the first digest of a new ISO week when the file for the week just ended is absent and the week
+  has something to review, and by the new `jarvis weekly [--week YYYY-Www] [--dry-run]`, through the
+  same vault writer and marker rule as the digest. Six sections with one regex per line: Runs,
+  Decided this week, Dropped threads, Snoozed and done, Flagged wrong (ids only), Cost by day;
+  `- None.` when empty, newest first, cap 30. Audit events `items_recorded` and `weekly_written`
+  (counts, week, path and hash; never text).
+- Item keys: brain items keep `meta["key"]`; a repo, task or GitHub item takes its title, because its
+  text changes with every commit subject and a key that moved every morning could never be snoozed.
+
+### Hub: Done, Snooze, seen marks and This week (`docs/hub-rework-contract.md` sections 7 to 9, hub side)
+
+Phases 3 and 4 of the rework on the hub side, verified offline and in a browser at 1440 and 375 px on
+2026-10-09. No real digest line was decided; the routes met the test tree only.
+
+- Every Needs you and Still open line carries `data-key` (the sidecar's key, or the normalised text for a note
+  written before the sidecar) and `data-id`, the text in `.t` and, when the id is in the latest run's
+  `state/runs/<job>/items.json`, a Done button and a Snooze disclosure (Tomorrow, 3 days, Monday, a date) in
+  `.act`: one row at 1440, the controls wrap under the text at 375, 44 px tap targets under 40rem.
+- Two new POST routes, `/today/<id>/done` and `/today/<id>/snooze`, one handler `decide_item` in
+  `jarvisd/hub/app.py`, the write path in the new `jarvisd/attention.py` (beside `jarvisd/inbox.py`): the Inbox
+  guards in the Inbox order, the id checked against the sidecar (404) and the key taken from there, `until`
+  validated (422), one lock (`state/attention/decide.lock`, busy is 409), one file per key under
+  `state/attention/` through `atomic_write_text`, a decision in force is 409 and an expired snooze is replaced,
+  audit `attention_decided` and `attention_decide_failed` (502) with ids only, 303 to Today with a banner.
+  `data.today()` hides a line with a decision in force at once and says "N lines decided, applied at the next
+  digest". `cmd_attend` is ready for the `jarvis attend` wiring on the CLI side.
+- Changed since yesterday gains the four thread lines of contract 6.2 (`n_since_*` from the front matter, texts
+  from `state/item-history.json` and the sidecar, five at most).
+- Seen marks: a second block in `/static/prefs.js` keeps `hub:seen` (digest id, keys, previous keys) in
+  `localStorage`, rolls it only when `<section id="today" data-digest>` changes, and adds class `seen` to a line
+  carried over from the last digest seen (`.seen .t` at 60 percent). A reload or the 30 s refresh stores nothing;
+  no network, no cookie. The rule runs under node in `tests/test_hub_face.py`.
+- Activity gains `<details id="week">` "This week": the newest `weekly-YYYY-Www.md` parsed by
+  `digestparse.parse_weekly` (the six sections of contract section 9, regex per line, raw lines kept), then
+  "Flagged wrong" from the `correction` audit events of the last 7 days in the label map's words, shown even
+  without a weekly note.
+- `docs/hub.md`: the security model names the second write path and the five POST routes; "Done and Snooze on
+  Today" and "Item keys and seen marks" are new sections; the views table and the status rows are updated.
+- Tests: `tests/test_attention.py` (new, mirrors `tests/test_inbox.py`), Today and Activity tests in
+  `tests/test_hub.py` with a sidecar and a history in the fixture, `parse_weekly` in `tests/test_hub_digestparse.py`
+  on a synthetic note and on real `render_weekly` output, the seen-marks harness in `tests/test_hub_face.py`.
+  The GET never-writes test, the 405 test, the CSP, the import and method bans, `NAV`, `check.VIEWS` and the CSS
+  bounds are unchanged.
+
 ### Hub: four views (`docs/hub-rework-contract.md` sections 2 to 5)
 
 The hub half of the rework, verified offline and in a browser at 1440 and 375 px on 2026-10-09. Nothing was

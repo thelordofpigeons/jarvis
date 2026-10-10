@@ -70,6 +70,12 @@ TASK_RESULTS: dict[int, str] = {
     2147946720: "refused by the operator or administrator",
 }
 TASK_OK_CODES = frozenset({0, 267009})
+# The resident daemon runs under MultipleInstances IgnoreNew, so its daily 06:00 trigger finds it already
+# running and Task Scheduler records 0x800710E0. For that task the code means "skipped, alive", not refused:
+# the daemon writing this line is the proof. jarvisd/daemon.py TASK_NAME (not imported: collectors stay leaf).
+RESIDENT_TASKS = frozenset({"JarvisDaemon"})
+REQUEST_REFUSED = 2147946720
+RESIDENT_SKIP_TEXT = "skipped, the daemon was already running (0x800710E0)"
 
 
 def task_result_text(code: object) -> str:
@@ -379,9 +385,10 @@ class SystemCollector:
                 continue
             last = parse_task_time(info.get("LastRunTime"))
             result = info.get("LastTaskResult")
-            decoded = task_result_text(result)
+            resident_skip = task in RESIDENT_TASKS and result == REQUEST_REFUSED
+            decoded = RESIDENT_SKIP_TEXT if resident_skip else task_result_text(result)
             tasks[task] = {"available": True, "last_result": result, "last_result_text": decoded,
-                           "ok": task_result_ok(result)}
+                           "ok": resident_skip or task_result_ok(result)}
             if last is None or last < _NEVER_BEFORE:
                 detail = decoded if result == 267011 else f"never ran, last result {decoded}"
                 out.append((task, f"{task}: {detail}."))

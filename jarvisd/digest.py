@@ -25,6 +25,14 @@ Limits, stated plainly:
 - One Claude call per job attempt. The design allows a second in-call attempt after 20 s for
   `timeout` and `transient`; here the job-level backoff (10 then 30 minutes, 3 attempts)
   does that work, so a bad night costs at most 3 calls, never 6.
+- After the note is in the vault the run writes `state/runs/<job>/items.json` (one record per
+  rendered item line) and updates `state/item-history.json`, both from `render.sidecar_items`,
+  which reads the records back from the rendered sections: a sensitive-held id has no line, so
+  it has no record (docs/hub-rework-contract.md section 6). The history and the attention
+  decisions under `state/attention/` are read before rendering, so a done key never prints, a
+  snoozed key waits for its date and a thread shown twice in Start here moves to Still open.
+  On the first run of a new ISO week the weekly review (`jarvisd/weekly.py`) goes through the
+  same vault writer. None of this happens on a dry run or after a refused vault write.
 - `payload_sealed` carries no `call_id`: the id is made inside `ClaudeClient.complete`. The
   `payload_sha256` in `claude_intent` ties the two records together.
 - A watermark advance is not atomic with the vault write. A crash between them means the next
@@ -161,6 +169,9 @@ class _Run:
     filename: str
     stages: dict[str, str] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    # What history and the attention files say about keys, loaded once before rendering (contract 6.1).
+    aging: render.Aging = field(default_factory=render.Aging)
+    decisions: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def audit(self) -> AuditLog:
@@ -434,8 +445,20 @@ def _context(run: _Run, results: Sequence[CollectResult], refs: Sequence[Withhel
         results={r.source: r for r in results}, status=status, late=late, claude_status=outcome.claude_status,
         local_tier=state, degraded=bool(degraded), cost_usd=cost, summary=outcome.summary, held=list(refs),
         over_cap=list(payload.over_cap) if payload is not None else [],
-        tier_violation_seq=outcome.tier_violation_seq, audit_seq=seq, audit_head=head,
+        tier_violation_seq=outcome.tier_violation_seq, audit_seq=seq, audit_head=head, aging=run.aging,
     )
+
+
+def _load_aging(run: _Run) -> None:
+    """Read the item history and the attention decisions into `run.aging` (a read; a dry run does it too,
+    so the dry note shows what a real run would). An unreadable store means no history, never a crash."""
+    try:
+        history = run.deps.state.items.load()
+        run.decisions = run.deps.state.items.decisions()
+        run.aging = render.aging_from(history, run.decisions, run.day)
+    except Exception as exc:  # noqa: BLE001  the note must still be written without its memory
+        run.errors.append(f"history: {type(exc).__name__}")
+        run.aging, run.decisions = render.Aging(), []
 
 
 def _attention_count(ctx: render.DigestContext) -> int:
@@ -520,6 +543,61 @@ def _result(run: _Run, status: str, counts: dict[str, int], cost: float, outcome
                   "withheld_refs": max(0, refs_only)},
         "errors": list(run.errors) + ([f"claude: {outcome.failure}"] if outcome.failure else []),
     }
+
+
+def _items_path(run: _Run) -> Path:
+    return run.deps.state.dir / "runs" / run.job.id / "items.json"
+
+
+def _write_items(run: _Run, ctx: render.DigestContext) -> None:
+    """The item sidecar and the history update, after the note is in the vault (contract section 6).
+
+    Both come from `render.sidecar_items`, which reads the records back from the same section bodies the
+    note printed: a sensitive-held id has no line, so it has no record, so it reaches neither file. Best
+    effort: a failure is recorded in the run's errors and never fails a job whose note is written.
+    """
+    try:
+        records = render.sidecar_items(ctx)
+        payload = {"job_id": run.job.id, "date": run.day.isoformat(), "items": records}
+        atomic_write_text(_items_path(run), json.dumps(payload, ensure_ascii=False, indent=1) + "\n")
+    except (OSError, ValueError) as exc:
+        run.errors.append(f"items: {type(exc).__name__}")
+        run.stages["items"] = "failed"
+        return
+    try:
+        counts = run.deps.state.items.apply(records, run.decisions, run.day, run.job.id)
+    except (OSError, FileBusy, ValueError) as exc:
+        run.errors.append(f"history: {type(exc).__name__}")
+        run.stages["items"] = "failed"
+        return
+    run.stages["items"] = "ok"
+    run.audit.emit("items_recorded", job_id=run.job.id, records=len(records), **{f"since_{k}": v for k, v in counts.items()})
+
+
+def _maybe_weekly(run: _Run) -> None:
+    """The weekly review for the ISO week just ended, once, on the first run of a new week (section 9).
+
+    Written when its file is absent and the week has something to review; a week with no run, no
+    decision, no drop, no click and no correction gets no note. Same vault writer and gate as the digest.
+    A refusal or a busy vault is recorded and never fails the digest job.
+    """
+    from jarvisd import weekly
+
+    week = weekly.previous_week(run.day)
+    try:
+        if run.deps.vault.raw_path(render.weekly_filename(week)).exists():
+            return
+        text, built = weekly.render_week(run.deps.state, run.audit, week, run.now)
+        if not weekly.has_material(built):
+            run.stages["weekly"] = "skipped"
+            return
+        written = run.deps.vault.write_raw(render.weekly_filename(week), text, run.job.id)
+    except (VaultWriteDenied, FileBusy, OSError, ValueError) as exc:
+        run.errors.append(f"weekly: {type(exc).__name__}")
+        run.stages["weekly"] = "failed"
+        return
+    run.stages["weekly"] = "ok"
+    run.audit.emit("weekly_written", job_id=run.job.id, week=week, rel=written.rel, sha256=written.sha256)
 
 
 def _advance_watermark(run: _Run) -> None:
@@ -615,6 +693,7 @@ def run_digest_job(job: Job, deps: Deps, *, mode: str = "daemon") -> dict[str, A
     items, gates, refs, state = _gate(run, results)
     _aggregate(run, gates, refs, state)
     payload, outcome = _seal(run, items, gates)
+    _load_aging(run)
     if run.dry:
         return _dry_result(run, refs, payload, outcome, len(items), results, state)
 
@@ -648,6 +727,8 @@ def run_digest_job(job: Job, deps: Deps, *, mode: str = "daemon") -> dict[str, A
         raise Retry(reason, VAULT_BUSY_DELAY if busy else VAULT_ERROR_DELAY) from exc
     run.stages["write"] = "ok"
     _drop_stash(run)
+    _write_items(run, ctx)
+    _maybe_weekly(run)
 
     _advance_watermark(run)
     run.stages["notify"] = _notify(run, ctx, outcome, written)

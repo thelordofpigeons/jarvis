@@ -37,8 +37,12 @@ Other sources, all optional:
 ## What is written
 
 One file per day: `<vault>/raw/jarvis/digest-YYYY-MM-DD.md` (the folder is `[paths].vault_write_raw`).
-The vault writer refuses every other place. With `write_session_note = true` it also writes
-`sessions/jarvis-*.md`; that is off by default.
+One file per week: `<vault>/raw/jarvis/weekly-YYYY-Www.md`, the weekly review (runs and cost,
+decisions, dropped threads, Done and Snooze clicks, corrections by id), written by the first digest
+of a new ISO week when the week before had something to review, or by `jarvis weekly`. The vault
+writer refuses every other place. With `write_session_note = true` it also writes
+`sessions/jarvis-*.md`; that is off by default. What the digest remembers between mornings (which
+line it showed, what you marked done or snoozed) lives outside the vault, under `state/`.
 
 ## What a fresh install shows
 
